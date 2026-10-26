@@ -1,0 +1,34 @@
+{
+  "type": "sequence",
+  "title": "News feed: reading the home timeline",
+  "subtitle": "Pushed ids from Redis + celebrity posts from RAM, ranked once per session, hydrated per page",
+  "spacing": 270,
+  "participants": [
+    { "id": "c", "kind": "client", "label": "Reader app" },
+    { "id": "tl", "kind": "service", "label": "Timeline service" },
+    { "id": "r", "kind": "redis", "label": "Redis" },
+    { "id": "rk", "kind": "service", "label": "Ranking stage" },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL shards" }
+  ],
+  "steps": [
+    { "from": "c", "to": "tl", "label": "GET /timeline?limit=20 (no cursor)" },
+    { "from": "tl", "to": "r", "label": "ZRANGE `tl:{u}` REV, first 800" },
+    { "section": "alt: key missing (user inactive for 7+ days)" },
+    { "from": "tl", "to": "pg", "label": "SELECT followee_id FROM following" },
+    { "from": "tl", "to": "r", "label": "ZRANGE `ap:{a}` per followee, pipelined" },
+    { "from": "tl", "to": "r", "label": "ZADD `tl:{u}` top 800, EXPIRE 7d" },
+    { "section": "merge, rank, hydrate" },
+    { "from": "tl", "to": "tl", "label": "merge followed celebrities' posts from RAM" },
+    { "from": "tl", "to": "rk", "label": "score ~1,000 candidates (50 ms budget)" },
+    { "note": "features: `aff:{u}` author affinity, `pc:{id}` counts,\npost age, media type; GBDT score, then diversity rules", "over": ["rk", "r"] },
+    { "from": "rk", "to": "tl", "reply": true, "label": "ranked ids (or timeout: chronological)" },
+    { "from": "tl", "to": "r", "label": "RPUSH `fs:{u}:{s}` ranked ids, EX 1800" },
+    { "from": "tl", "to": "r", "label": "GET `post:{id}`, HGETALL `pc:{id}` (page 1)" },
+    { "from": "tl", "to": "pg", "label": "misses: SELECT ... post_id = ANY($1)" },
+    { "from": "tl", "to": "tl", "label": "drop deleted, blocked, muted, suspended" },
+    { "from": "tl", "to": "c", "reply": true, "label": "200 items + cursor {session, offset 20}" },
+    { "section": "next page" },
+    { "from": "c", "to": "tl", "label": "GET /timeline?cursor=..." },
+    { "from": "tl", "to": "r", "label": "LRANGE `fs:{u}:{s}` 20 39, hydrate" }
+  ]
+}

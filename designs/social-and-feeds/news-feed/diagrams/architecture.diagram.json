@@ -1,0 +1,42 @@
+{
+  "type": "architecture",
+  "title": "News feed: high-level architecture",
+  "subtitle": "Push post ids into active followers' Redis timelines; pull celebrity posts at read time; PostgreSQL holds the truth",
+  "grid": { "nodeW": 200, "cellW": 300, "rowH": 150 },
+  "nodes": [
+    { "id": "cdn", "kind": "cdn", "label": "CDN", "col": 0, "row": 0, "lines": ["image and video renditions", "origin: media bucket"] },
+    { "id": "client", "kind": "client", "label": "Web and mobile", "col": 0, "row": 1.5, "lines": ["Idempotency-Key on posts", "opaque cursors"] },
+    { "id": "s3", "kind": "storage", "label": "S3 media bucket", "col": 0, "row": 3, "lines": ["upload via pre-signed PUT", "event -> transcoder"] },
+    { "id": "gw", "kind": "gateway", "label": "API gateway", "col": 1, "row": 1.5, "lines": ["auth, rate limit", "TLS, routing"] },
+    { "id": "tl", "kind": "service", "label": "Timeline service", "col": 2, "row": 0.3, "lines": ["read `tl:*`, merge celebs", "rank, hydrate, filter", "celebrity posts in RAM"] },
+    { "id": "post", "kind": "service", "label": "Post service", "col": 2, "row": 1.5, "lines": ["create, delete", "pre-signed upload URLs", "post + outbox in one tx"] },
+    { "id": "graph", "kind": "service", "label": "Graph service", "col": 2, "row": 2.6, "lines": ["follow, unfollow, block", "edge + outbox in one tx"] },
+    { "id": "engage", "kind": "service", "label": "Engagement service", "col": 2, "row": 3.7, "lines": ["likes, replies", "idempotent PUT/DELETE"] },
+    { "id": "redis", "kind": "redis", "label": "Redis Cluster", "col": 3, "row": 0.3, "lines": ["`tl:{user}` 800 entries", "`ap:{author}` recent posts", "`post:{id}` `pc:{id}`", "`aff:{user}` `fs:*`"] },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL shards", "col": 3, "row": 2.6, "h": 380, "lines": ["posts + outbox (by author)", "following, followers", "likes (post's shard)", "source of truth"] },
+    { "id": "kafka", "kind": "queue", "label": "Kafka", "col": 4, "row": 2.6, "lines": ["post.events", "fanout.jobs", "follow.events", "like.events"] },
+    { "id": "fanout", "kind": "worker", "label": "Fan-out workers", "col": 5, "row": 1.0, "lines": ["router: 1,000-id jobs", "Lua: add if key exists", "skip celebs, inactive", "unfollow, delete cleanup"] },
+    { "id": "counter", "kind": "worker", "label": "Counter aggregator", "col": 5, "row": 3.7, "lines": ["sums likes per 2 s", "HINCRBY `pc:{id}`"] }
+  ],
+  "edges": [
+    { "from": "client", "to": "gw", "label": "HTTPS" },
+    { "from": "client", "to": "cdn", "label": "GET media" },
+    { "from": "client", "to": "s3", "label": "PUT pre-signed" },
+    { "from": "gw", "to": "tl", "route": "hvh", "label": "GET /timeline", "labelSeg": 1, "labelPos": 0.5 },
+    { "from": "gw", "to": "post", "label": "POST /posts" },
+    { "from": "gw", "to": "graph", "route": "hvh", "label": "PUT /follow", "labelSeg": 1, "labelPos": 0.45 },
+    { "from": "gw", "to": "engage", "route": "hvh", "label": "PUT /like", "labelSeg": 1, "labelPos": 0.7 },
+    { "from": "tl", "to": "redis", "label": "ZRANGE, GET" },
+    { "from": "tl", "to": "pg", "route": "hvh", "via": 885, "offset": 34, "offset2": -160, "label": "miss, rebuild", "labelSeg": 1, "labelPos": 0.8 },
+    { "from": "post", "to": "pg", "offset": 15, "label": "tx" },
+    { "from": "graph", "to": "pg", "label": "tx" },
+    { "from": "engage", "to": "pg", "label": "tx" },
+    { "from": "pg", "to": "kafka", "dashed": true, "label": "CDC" },
+    { "from": "kafka", "to": "fanout", "route": "hvh", "via": 1482, "offset": -25, "dashed": true, "both": true, "label": "events, jobs", "labelSeg": 1 },
+    { "from": "kafka", "to": "counter", "dashed": true, "offset": 25, "label": "like.events", "labelSeg": 0, "labelPos": 0.6 },
+    { "from": "kafka", "to": "tl", "route": "vhv", "via": 300, "dashed": true, "label": "post.events (celebs)", "labelSeg": 1, "labelPos": 0.45 },
+    { "from": "fanout", "to": "redis", "route": "hvh", "via": 1192, "offset": -30, "offset2": 20, "label": "EVALSHA", "labelSeg": 1, "labelPos": 0.35 },
+    { "from": "fanout", "to": "pg", "route": "hvh", "via": 1162, "offset": 30, "offset2": -110, "label": "followers", "labelSeg": 1 },
+    { "from": "counter", "to": "pg", "label": "batched UPDATE" }
+  ]
+}
