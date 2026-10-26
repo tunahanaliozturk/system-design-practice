@@ -1,0 +1,29 @@
+{
+  "type": "sequence",
+  "title": "News feed: celebrity posts, pulled at read time",
+  "subtitle": "Every Timeline node holds all celebrity recent posts in RAM (~120 MB); Redis never sees the hot reads",
+  "spacing": 225,
+  "participants": [
+    { "id": "k", "kind": "queue", "label": "Kafka" },
+    { "id": "tl", "kind": "service", "label": "Timeline node" },
+    { "id": "r", "kind": "redis", "label": "Redis" },
+    { "id": "c", "kind": "client", "label": "Reader app" }
+  ],
+  "steps": [
+    { "section": "node start" },
+    { "from": "tl", "to": "r", "label": "ZRANGE `ap:{c}` for every celebrity" },
+    { "from": "tl", "to": "tl", "label": "mark ready, join the load balancer" },
+    { "section": "a celebrity posts" },
+    { "from": "k", "to": "tl", "dashed": true, "label": "post.events: PostCreated" },
+    { "from": "tl", "to": "tl", "label": "author in celebrity set? keep last 100" },
+    { "section": "a follower reads" },
+    { "from": "c", "to": "tl", "label": "GET /timeline" },
+    { "from": "tl", "to": "r", "label": "ZRANGE `tl:{u}` (pushed ids)" },
+    { "from": "tl", "to": "r", "label": "SMEMBERS `fc:{u}` (followed celebrities)" },
+    { "from": "tl", "to": "tl", "label": "read RAM lists, top 300 by affinity, 72 h" },
+    { "from": "tl", "to": "tl", "label": "merge by time, dedupe by post_id" },
+    { "from": "tl", "to": "tl", "label": "hot posts: node LRU, 2 s TTL" },
+    { "from": "tl", "to": "c", "reply": true, "label": "page with pushed + pulled posts" },
+    { "note": "crossing 1M followers flips is_celebrity;\nold pushed copies age out, dedupe hides doubles", "over": ["tl", "r"] }
+  ]
+}

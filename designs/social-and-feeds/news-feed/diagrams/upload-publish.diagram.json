@@ -1,0 +1,31 @@
+{
+  "type": "sequence",
+  "title": "News feed: upload media and publish",
+  "subtitle": "Media bytes go straight to S3; the post commits with its outbox row only once the media is READY",
+  "spacing": 220,
+  "participants": [
+    { "id": "c", "kind": "client", "label": "Author app" },
+    { "id": "s3", "kind": "storage", "label": "S3 media bucket" },
+    { "id": "tc", "kind": "worker", "label": "Transcoder" },
+    { "id": "k", "kind": "queue", "label": "Kafka" },
+    { "id": "ps", "kind": "service", "label": "Post service" },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL shard" }
+  ],
+  "steps": [
+    { "from": "c", "to": "ps", "label": "POST /media/uploads {kind, bytes}" },
+    { "from": "ps", "to": "pg", "label": "INSERT media (PENDING)" },
+    { "from": "ps", "to": "c", "reply": true, "label": "201 media_id + pre-signed PUT URL (15 min)" },
+    { "from": "c", "to": "s3", "label": "PUT bytes (pre-signed)" },
+    { "from": "s3", "to": "tc", "dashed": true, "label": "ObjectCreated" },
+    { "from": "tc", "to": "s3", "label": "renditions: thumb, 640, 1080, HLS" },
+    { "from": "tc", "to": "k", "dashed": true, "label": "media.events READY" },
+    { "from": "k", "to": "ps", "dashed": true, "label": "READY" },
+    { "from": "ps", "to": "pg", "label": "UPDATE media SET state = READY" },
+    { "section": "publish" },
+    { "from": "c", "to": "ps", "label": "POST /posts + `Idempotency-Key`" },
+    { "from": "ps", "to": "pg", "label": "check every media_id is READY" },
+    { "note": "BEGIN\nINSERT posts ... ON CONFLICT\n(author_id, client_key) DO NOTHING\nINSERT outbox PostCreated\nCOMMIT", "over": ["ps", "pg"] },
+    { "from": "ps", "to": "c", "reply": true, "label": "201 post_id (409 if media not READY)" },
+    { "note": "the app shows the post at the top\nof the author's own feed right away", "at": "c" }
+  ]
+}

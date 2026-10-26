@@ -1,0 +1,32 @@
+{
+  "type": "sequence",
+  "title": "News feed: follow and unfollow",
+  "subtitle": "One local transaction per edge; the reverse edge and timeline changes follow from the event",
+  "spacing": 220,
+  "participants": [
+    { "id": "c", "kind": "client", "label": "Follower app" },
+    { "id": "gs", "kind": "service", "label": "Graph service" },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL shards" },
+    { "id": "k", "kind": "queue", "label": "Kafka" },
+    { "id": "w", "kind": "worker", "label": "follow.events consumer" },
+    { "id": "r", "kind": "redis", "label": "Redis" }
+  ],
+  "steps": [
+    { "from": "c", "to": "gs", "label": "PUT /users/{id}/follow" },
+    { "from": "gs", "to": "pg", "label": "tx: INSERT following + outbox" },
+    { "from": "gs", "to": "c", "reply": true, "label": "204" },
+    { "from": "pg", "to": "k", "dashed": true, "label": "CDC: Followed" },
+    { "from": "k", "to": "w", "dashed": true, "label": "follow.events" },
+    { "from": "w", "to": "pg", "label": "INSERT followers, bump user_stats" },
+    { "from": "w", "to": "r", "label": "backfill: last 20 of `ap:{followee}`" },
+    { "note": "add_if_exists into `tl:{follower}`\nskipped for a celebrity: pulled at read", "over": ["w", "r"] },
+    { "section": "unfollow" },
+    { "from": "c", "to": "gs", "label": "DELETE /users/{id}/follow" },
+    { "from": "gs", "to": "pg", "label": "tx: DELETE following + outbox" },
+    { "from": "gs", "to": "c", "reply": true, "label": "204" },
+    { "from": "k", "to": "w", "dashed": true, "label": "Unfollowed (via CDC)" },
+    { "from": "w", "to": "pg", "label": "DELETE followers, bump user_stats" },
+    { "from": "w", "to": "r", "label": "Lua: ZREM followee's entries" },
+    { "note": "scans 800 members of `tl:{follower}`\neach member carries its author_id", "over": ["w", "r"] }
+  ]
+}

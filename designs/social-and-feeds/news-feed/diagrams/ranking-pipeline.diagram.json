@@ -1,0 +1,31 @@
+{
+  "type": "architecture",
+  "title": "News feed: ranking pipeline",
+  "subtitle": "Runs once per feed session; any timeout falls back to chronological order",
+  "nodes": [
+    { "id": "src", "kind": "redis", "label": "Candidate sources", "col": 0, "row": 0, "lines": ["`tl:{u}` pushed ids", "celebrity posts in RAM"] },
+    { "id": "feat", "kind": "redis", "label": "Feature store", "col": 2, "row": 0, "lines": ["`aff:{u}` affinity", "`pc:{id}` counts", "node LRU in front"] },
+    { "id": "job", "kind": "worker", "label": "Affinity job", "col": 3, "row": 0, "lines": ["nightly batch", "top 500 authors per user"] },
+    { "id": "ev", "kind": "queue", "label": "Engagement events", "col": 4, "row": 0, "lines": ["like.events, replies", "profile visits, dwell"] },
+    { "id": "s1", "kind": "service", "tag": "STAGE 1", "label": "Candidates", "col": 0, "row": 1.3, "lines": ["up to 800 pushed", "up to 300 celebrity", "last 72 h"] },
+    { "id": "s2", "kind": "service", "tag": "STAGE 2", "label": "Filter", "col": 1, "row": 1.3, "lines": ["seen (session bloom)", "blocked, muted", "deleted"] },
+    { "id": "s3", "kind": "service", "tag": "STAGE 3", "label": "Features", "col": 2, "row": 1.3, "lines": ["affinity, counts", "age, media type", "author engagement"] },
+    { "id": "s4", "kind": "service", "tag": "STAGE 4", "label": "Score", "col": 3, "row": 1.3, "lines": ["GBDT model", "~10 ms for 1,000", "hard timeout 50 ms"] },
+    { "id": "s5", "kind": "service", "tag": "STAGE 5", "label": "Rerank", "col": 4, "row": 1.3, "lines": ["max 2 in a row", "per author", "freshness boost"] },
+    { "id": "s6", "kind": "redis", "tag": "STAGE 6", "label": "Session list", "col": 5, "row": 1.3, "lines": ["`fs:{u}:{s}` ids", "EX 1800", "pages slice it"] },
+    { "id": "fb", "kind": "service", "tag": "FALLBACK", "label": "Chronological", "col": 3, "row": 2.6, "lines": ["sort by timestamp", "same code as mode=latest"] }
+  ],
+  "edges": [
+    { "from": "src", "to": "s1", "label": "ids" },
+    { "from": "s1", "to": "s2", "label": "~1,100" },
+    { "from": "s2", "to": "s3", "label": "~1,000" },
+    { "from": "s3", "to": "s4" },
+    { "from": "s4", "to": "s5", "label": "scored" },
+    { "from": "s5", "to": "s6", "label": "ordered" },
+    { "from": "feat", "to": "s3", "label": "HMGET" },
+    { "from": "job", "to": "feat", "label": "write" },
+    { "from": "ev", "to": "job", "dashed": true, "label": "daily" },
+    { "from": "s4", "to": "fb", "dashed": true, "label": "timeout" },
+    { "from": "fb", "to": "s6", "route": "hv", "label": "ordered" }
+  ]
+}

@@ -188,6 +188,16 @@ CREATE TABLE blocks (                               -- sharded by blocker_id; mu
     PRIMARY KEY (blocker_id, blocked_id)
 );
 
+CREATE TABLE media (                               -- on the uploader's shard (shard bits in media_id)
+    media_id     bigint      PRIMARY KEY,
+    owner_id     bigint      NOT NULL,
+    kind         smallint    NOT NULL,              -- 0 image, 1 video
+    state        smallint    NOT NULL DEFAULT 0,    -- 0 PENDING, 1 READY, 2 FAILED
+    s3_key       text        NOT NULL UNIQUE,
+    bytes        bigint      NOT NULL CHECK (bytes > 0 AND bytes <= 536870912),
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+
 -- Routed by the logical shard inside post_id, so a like sits next to its post
 CREATE TABLE likes (
     post_id      bigint      NOT NULL,
@@ -213,6 +223,7 @@ eventually consistent by a second or two, which only delays the first fan-out to
 | `aff:{user_id}` | HASH author_id -> affinity score, top 500 authors | 2 days, rebuilt nightly | ranking feature |
 | `fs:{user_id}:{session}` | LIST of ranked post ids for one feed session | 30 min | stable pagination in ranked mode |
 | `hide:{user_id}` | SET of blocked and muted author ids | 1 day | read-time filter |
+| `fc:{user_id}` | SET of celebrity ids this user follows | 1 day | which in-RAM celebrity lists to merge |
 
 `tl:*` keys are listpack-encoded ZSETs (`zset-max-listpack-entries 1024`), which keeps an 800-entry
 timeline at ~22 KB instead of ~60 KB as a skiplist. The score is the timestamp, not the post id,
@@ -229,6 +240,7 @@ What if Redis loses keys:
 - `aff:*`: ranking falls back to recency-only scores until the nightly job runs again.
 - `fs:*`: the user's next page starts a new session at the top. Annoying, harmless.
 - `hide:*`: reloaded from `blocks` on the viewer's shard. Until then the read path checks the table.
+- `fc:*`: recomputed from `following` filtered by the in-memory celebrity set.
 
 **Kafka topics** (partitioned by entity id)
 
@@ -266,35 +278,40 @@ post plus batch so the hundreds of batches of a big author spread over all parti
 
 ## 6. Request flows
 
+Step numbers in the text match the numbered arrows in each diagram.
+
 ### 6.1 Upload media and publish
 
-1. Client calls `POST /media/uploads`. Post service creates a `media_id`, returns a pre-signed S3 PUT
-   URL valid for 15 minutes, scoped to one key and one content length.
-2. Client uploads the file straight to S3. The S3 event triggers the transcoder, which writes
-   renditions (thumbnail, 640, 1080, HLS for video) and publishes `media.events` `READY`.
-3. Client calls `POST /posts` with `Idempotency-Key` and the media ids. Post service checks media
-   state, then in one transaction inserts the post (`ON CONFLICT (author_id, client_key) DO NOTHING`,
-   returning the existing row on a retry) and the `PostCreated` outbox row.
-4. Response `201` with the post id. The client inserts the post at the top of the author's own feed
-   locally; the Timeline service also merges `ap:{self}` on read, so a refresh shows it too.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/upload-publish-dark.png">
+  <img alt="Sequence: the author app asks Post service for an upload; Post service records the media as PENDING and returns a pre-signed URL; the app PUTs bytes to S3; S3 notifies the transcoder, which writes renditions and publishes READY to Kafka; Post service marks the media READY. Then POST /posts checks the media and commits the post plus an outbox row in one transaction." src="diagrams/upload-publish-light.png">
+</picture>
+
+- **1-2.** Post service records the media as `PENDING` and returns a pre-signed PUT URL: one key, one
+  content length, 15 minutes.
+- **3.** The bytes go straight to S3. Our servers never carry them.
+- **4-6.** The S3 event starts the transcoder; it writes renditions and publishes `READY`.
+- **7-8.** Post service consumes `media.events` and marks the media `READY`.
+- **9-10.** `POST /posts` checks every media id is `READY` (409 if not), then commits the post and the
+  `PostCreated` outbox row in one transaction. A retry with the same key hits the unique constraint
+  and returns the original post.
+- The app shows the post at the top of its own feed at once; the Timeline service also merges
+  `ap:{self}` on read, so a refresh shows it too.
 
 ### 6.2 Fan-out
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/publish-fanout-dark.png">
-  <img alt="Sequence: the author app posts; Post service commits post and outbox; CDC publishes PostCreated; the router writes ap:{author}; for a normal author it pages followers and emits fanout.jobs, workers drop inactive ids and run a Lua add-if-exists per follower; for a celebrity there is no fan-out." src="diagrams/publish-fanout-light.png">
+  <img alt="Sequence: CDC publishes PostCreated; the router writes ap:{author}; for a normal author it pages followers and emits fanout.jobs, workers drop inactive ids and run a Lua add-if-exists per follower, then commit the offset; for a celebrity there is no fan-out." src="diagrams/publish-fanout-light.png">
 </picture>
 
-1. Debezium reads the outbox row from the WAL and publishes `PostCreated` to `post.events`.
-2. The router writes `ap:{author}` (ZADD, trim to 100). Every author gets this, celebrity or not.
-3. If the author is a celebrity, stop. Timeline nodes consume the same event into their memory.
-4. Otherwise the router pages `followers` by keyset (`WHERE followee_id = $1 AND follower_id > $2
-   ORDER BY follower_id LIMIT 1000`) and emits one `fanout.jobs` message per page.
-5. A worker drops ids that are not in its in-memory active-user bitmap (1.5B bits = ~190 MB, refreshed
-   every 5 minutes), then pipelines one `EVALSHA` per remaining follower: add if the timeline exists,
-   trim to 800.
-6. The worker commits its offset after the pipeline returns. A crash replays the job; `ZADD` with the
-   same member and score is a no-op, so replays never duplicate entries.
+- **1-2.** Debezium turns the outbox row into `PostCreated` on `post.events`.
+- **3.** Every author's post goes into `ap:{author}`. For a celebrity this is the only write.
+- **4-5.** The router pages `followers` by keyset, 1,000 ids at a time, one `fanout.jobs` message each.
+- **6-7.** A worker drops ids missing from its active-user bitmap (1.5B bits = ~190 MB, refreshed every
+  5 minutes).
+- **8.** One pipelined `EVALSHA` per remaining follower: add if the timeline exists, trim to 800.
+- **9.** Commit after the pipeline returns. A replay re-adds the same member and score, a no-op.
 
 ### 6.3 Read the home timeline
 
@@ -303,45 +320,57 @@ post plus batch so the hundreds of batches of a big author spread over all parti
   <img alt="Sequence: Timeline service reads tl:{u} from Redis, rebuilds it from following and ap:{a} keys if missing, merges celebrity posts from RAM, asks the ranking stage to score about 1,000 candidates, stores the ranked list in fs:{u}:{s}, hydrates page one from post and pc keys with PostgreSQL for misses, filters deleted and blocked content, and returns a cursor. The next page reads the session list." src="diagrams/read-timeline-light.png">
 </picture>
 
-1. `ZRANGE tl:{u} +inf -inf BYSCORE REV LIMIT 0 800`, then `EXPIRE tl:{u} 7d`. Only reads refresh the
-   TTL; fan-out never does, so an account nobody opens expires even if its followees post all day.
-2. Missing key: rebuild (7.2), then continue.
-3. Merge in posts from the celebrities this user follows, taken from process memory. The list of
-   followed celebrities comes from `following` joined with the in-memory celebrity set, cached per user.
-4. Rank (7.4), or sort by time in `latest` mode. Store the ordered ids in `fs:{u}:{s}` for 30 minutes.
-5. Hydrate the first 20: node-local LRU, then pipelined `GET post:{id}` and `HGETALL pc:{id}` grouped by Redis shard, then PostgreSQL for misses, grouped
-   by shard and sent in parallel.
-6. Drop tombstoned posts, authors in `hide:{u}`, and authors whose state is suspended or deleted. Pull
-   a few extra ids to refill the page if anything was dropped.
-7. Return the page and a cursor. Later pages slice `fs:{u}:{s}` and hydrate; no re-ranking, so items
-   never jump between pages.
+- **1-2.** Read the newest 800 ids, then `EXPIRE tl:{u} 7d`. Only reads refresh the TTL, never fan-out.
+- **3-5.** Key missing: rebuild it (7.2).
+- **6.** Merge followed celebrities' posts from process memory (7.3).
+- **7.** Rank (7.4), or sort by time in `latest` mode.
+- **8.** Keep the ordered ids in `fs:{u}:{s}` for 30 minutes.
+- **9-10.** Hydrate page one: node LRU, then Redis, then PostgreSQL for misses, in parallel per shard.
+- **11.** Drop tombstones, `hide:{u}` authors, suspended and deleted authors; refill the page.
+- **12-13.** Later pages slice the session list. No re-ranking, so items never jump between pages.
 
 Latency budget at p99: Redis read 3 ms, merge 1 ms, ranking 50 ms (hard timeout), hydration 15 ms with
 misses, filtering 1 ms. ~70 ms plus network, well inside 200 ms.
 
 ### 6.4 Follow and unfollow
 
-1. `PUT /users/{id}/follow`: insert into `following` and the outbox in one transaction.
-2. `follow.events` consumers write the `followers` edge, bump `user_stats`, and backfill: copy the
-   followee's last 20 posts from `ap:{followee}` into `tl:{follower}` so the new follow shows up at once.
-3. Unfollow: delete the edge, then a cleanup job scans `tl:{follower}` (800 members, each carries its
-   author id) and `ZREM`s that author's entries. 800 members is a single-digit-millisecond scan.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/follow-unfollow-dark.png">
+  <img alt="Sequence: Graph service inserts the following edge and an outbox row; CDC publishes Followed; a follow.events consumer writes the reverse followers edge, bumps counts and backfills the followee's last 20 posts into the follower's timeline. Unfollow deletes the edge; the consumer deletes the reverse edge and removes the followee's entries from the timeline with a Lua script." src="diagrams/follow-unfollow-light.png">
+</picture>
+
+- **1-2.** One transaction on the follower's shard: the edge and an outbox row. `PUT` makes it idempotent.
+- **3-5.** The consumer writes the reverse edge on the followee's shard and bumps `user_stats`.
+- **6.** Backfill the followee's last 20 posts so the follow shows up at once. Skipped for celebrities.
+- **7-8.** Unfollow is the same transaction shape with `DELETE`.
+- **9-10.** The consumer deletes the reverse edge.
+- **11.** A Lua script scans the 800 members of `tl:{follower}` and removes the followee's entries.
 
 ### 6.5 Like
 
-1. `PUT /posts/{id}/like`: `INSERT INTO likes ... ON CONFLICT DO NOTHING` plus an outbox row, but only
-   if a row was inserted. A second tap writes nothing and emits nothing.
-2. The aggregator consumes `like.events` by post id, sums `+1`/`-1` over 2 s, then runs
-   `HINCRBY pc:{id} likes <delta>` and `UPDATE posts SET like_count = like_count + $delta`.
-3. A viral post with 50K likes per second becomes one Redis call and one row update every 2 s.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/like-dark.png">
+  <img alt="Sequence: Engagement service inserts the like row and, only if inserted, an outbox row; CDC publishes like.events keyed by post; the counter aggregator sums deltas per post for 2 seconds, then runs one HINCRBY on pc:{id} and one UPDATE of like_count, then commits its offset." src="diagrams/like-light.png">
+</picture>
+
+- **1-2.** The like row is the truth. A second tap inserts nothing and emits nothing.
+- **3-4.** `like.events` is keyed by post, so one aggregator owns each post's counter.
+- **5.** Sum `+1`/`-1` per post over 2 s.
+- **6-7.** One `HINCRBY` and one `UPDATE` per post per window.
+- **8.** Commit. A crash between 7 and 8 replays one window and over-counts it; a daily job recounts
+  posts liked that day from `likes` and corrects both stores.
 
 ### 6.6 Delete a post
 
-1. Set `deleted_at`, write a `PostDeleted` outbox row, and overwrite `post:{id}` with a tombstone in
-   the same request. From this moment hydration drops the post everywhere.
-2. The router sends cleanup jobs to the same followers (`ZREM` from their timelines) and removes it
-   from `ap:{author}`. Timeline nodes evict it from the celebrity cache.
-3. The cleanup is tidiness, not correctness. Hydration is the guarantee.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/delete-post-dark.png">
+  <img alt="Sequence: Post service sets deleted_at with a PostDeleted outbox row and overwrites post:{id} with a tombstone, then returns 204; from then on hydration drops the post. Async cleanup: CDC publishes PostDeleted; fan-out workers remove it from ap:{author} and, page by page of followers, from each timeline; Timeline nodes evict it from celebrity RAM." src="diagrams/delete-post-light.png">
+</picture>
+
+- **1-3.** Tombstone the row and the cached post in the same request. The post stops rendering now.
+- **4-5.** `PostDeleted` follows `PostCreated` on the same partition (same author key).
+- **6-8.** Remove the id from `ap:{author}` and from every follower's timeline. This is tidiness;
+  hydration is the guarantee.
 
 ## 7. Deep dives
 
@@ -405,17 +434,23 @@ return 0
 
 **Rebuild on login.** When a read finds no key:
 
-1. Read the user's followees from `following` (one query on the viewer's shard, ~200 rows).
-2. Drop celebrities; they come from memory anyway.
-3. Pipeline `ZRANGE ap:{a} 0 49 REV` for the remaining followees, grouped by Redis shard. A missing
-   `ap:` key falls back to `posts_author_recent` on the author's shard.
-4. K-way merge by timestamp, take 800, write `tl:{u}` with one `ZADD` and set the 7-day TTL.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/timeline-rebuild-dark.png">
+  <img alt="Sequence: a returning user's read finds tl:{u} empty; the Timeline service takes a rebuild token, reads followees from PostgreSQL, drops celebrities, reads ap:{a} for each followee from Redis with a PostgreSQL fallback, merges to 800 and writes tl:{u} with a 7-day TTL. If the token bucket is empty it serves a degraded page from the top 50 followees and queues a background rebuild." src="diagrams/timeline-rebuild-light.png">
+</picture>
+
+- **1-3.** The key expired, so the node takes a token from its rebuild bucket.
+- **4.** Followees from `following`: one query on the viewer's shard, ~200 rows.
+- **5.** Drop celebrities; they come from memory at read time anyway.
+- **6-7.** Pipelined `ZRANGE ap:{a} 0 49 REV`, grouped by Redis shard. A missing `ap:` key falls back
+  to `posts_author_recent` on the author's shard.
+- **8-9.** K-way merge by time, keep 800, one `ZADD`, 7-day TTL.
+- **10-11.** No token: serve a page built from the top 50 followees by affinity, store nothing, and
+  queue a background rebuild.
 
 This takes 30-60 ms, mostly Redis round trips. Returning users are ~15M a day (~175/s), so it is cheap
 in steady state. The danger is a storm: losing a Redis shard (~1% of users) or a mass return after an
-outage. Each Timeline node gets a rebuild token bucket. Over budget, the node serves a degraded first
-page (merge of `ap:` for the user's top 50 followees by affinity, not stored) and rebuilds in the
-background.
+outage. The token bucket per node is what keeps a storm from becoming a PostgreSQL outage.
 
 Sizing knobs if ~9 TB is too much: cap at 500 entries (-38%), shorten the activity window to 3 days,
 or drop the author id from the member (8-byte members) and filter unfollows at read time instead.
@@ -432,8 +467,23 @@ Three different things go wrong with very large accounts, and the design answers
   `pc:{id}` for it become hot keys. Answer: a node-local LRU with a 2 s TTL in front of Redis for posts
   from the celebrity set. 2 s staleness on a like count is invisible.
 
+How the pull side works end to end:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/celebrity-merge-dark.png">
+  <img alt="Sequence: on start a Timeline node loads ap:{c} for every celebrity from Redis before joining the load balancer; when a celebrity posts, the node consumes PostCreated and keeps the last 100 posts in RAM; on a read it fetches pushed ids from tl:{u} and the followed-celebrity set fc:{u}, reads the RAM lists for up to 300 celebrities, merges by time, dedupes by post id, and serves hot posts from a node-local LRU." src="diagrams/celebrity-merge-light.png">
+</picture>
+
+- **1-2.** A node warms its celebrity cache from `ap:{c}` before it takes traffic; a cold node would
+  serve feeds with the biggest accounts missing.
+- **3-4.** Every node consumes `post.events` and keeps the last 100 posts per celebrity.
+- **5-7.** A read fetches the pushed ids and `fc:{u}`, the set of celebrities this user follows.
+- **8-9.** Up to 300 celebrities (highest affinity first), last 72 h, merged by time, deduplicated.
+- **10.** Hot posts are hydrated from the node LRU, so Redis sees each one about once per 2 s per node.
+
 Crossing the threshold: when an author passes 1M followers the flag flips in `user_stats` and the
-router reloads its celebrity set (every minute). Posts already pushed stay in timelines and age out;
+router and Timeline nodes reload the celebrity set (every minute). The `follow.events` consumer keeps
+`fc:{u}` current. Posts already pushed stay in timelines and age out;
 new posts are pulled. The merge de-duplicates by post id, so a post that ended up in both is shown
 once. Dropping below 800K flips back to push; the next posts fan out normally.
 
@@ -448,16 +498,20 @@ is the fallback for every ranking failure. Ship this first and keep `mode=latest
 
 **Version 2: scored**, run once per feed session (first page or pull-to-refresh), ~50K/s at peak:
 
-1. **Candidates.** Up to 800 from `tl:{u}`, up to 300 from followed celebrities, last 72 h only.
-2. **Filter.** Drop seen-recently (a small per-session bloom filter), blocked, muted, deleted.
-3. **Features.** Per candidate: author affinity from `aff:{u}`, like and reply counts from `pc:{id}`,
-   age, media type, the author's recent engagement rate. Counts come mostly from the node-local cache;
-   popular posts appear in many feeds, so hit rates are high.
-4. **Score.** A gradient-boosted tree model predicts the probability of engagement. ~1,000 candidates
-   score in ~10 ms on CPU. Hard timeout 50 ms, then fall back to chronological.
-5. **Rerank.** At most two posts in a row from the same author, a freshness boost for the last hour,
-   own posts pinned near the top after posting.
-6. **Store** the ordered ids in `fs:{u}:{s}`. Later pages slice this list.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/ranking-pipeline-dark.png">
+  <img alt="Ranking pipeline: candidates from tl:{u} and celebrity RAM, then filter, then features from a feature store fed nightly by an affinity job over engagement events, then a GBDT score with a 50 ms timeout that falls back to chronological order, then rerank, then the session list fs:{u}:{s}." src="diagrams/ranking-pipeline-light.png">
+</picture>
+
+- **Stage 1, candidates.** Up to 800 pushed ids and 300 celebrity posts, last 72 h.
+- **Stage 2, filter.** Seen recently (a per-session bloom filter), blocked, muted, deleted.
+- **Stage 3, features.** Affinity from `aff:{u}`, counts from `pc:{id}`, age, media type, author
+  engagement rate. Popular posts appear in many feeds, so the node LRU absorbs most count lookups.
+- **Stage 4, score.** A gradient-boosted tree model predicts engagement: ~10 ms for ~1,000
+  candidates on CPU. At 50 ms the request takes the chronological path instead.
+- **Stage 5, rerank.** At most two posts in a row per author, a freshness boost for the last hour,
+  the viewer's own new posts pinned near the top.
+- **Stage 6, session list.** The ordered ids go to `fs:{u}:{s}`; later pages slice it.
 
 The affinity table is a nightly batch job over engagement events (likes, replies, profile visits,
 dwell time) that writes `aff:{u}` for the top 500 authors per user. Online events adjust nothing in
@@ -499,6 +553,7 @@ and the late batch re-adds the id. It does no harm, because the tombstone filter
 | Celebrity cache on a node is cold (restart) | celebrity posts missing from feeds on that node | node warms from `ap:{celeb}` for the celebrity set before taking traffic |
 | Delete races fan-out | deleted id re-added to some timelines | tombstone filter at hydration |
 | Counter aggregator lag | like counts stale | counts catch up from Kafka; PostgreSQL rows are the truth |
+| Aggregator crashes after writing, before committing | one 2 s window counted twice | daily recount from `likes` for posts liked that day fixes Redis and `like_count` |
 | Transcoder fails | media never `READY` | post creation returns 409; client retries the upload |
 | Pre-signed URL leaked | someone uploads to that one key | URL is single-key, size-bound and expires in 15 minutes; unreferenced media is deleted after 24 h |
 

@@ -1,0 +1,28 @@
+{
+  "type": "sequence",
+  "title": "News feed: deleting a post",
+  "subtitle": "The tombstone hides the post at once; removing ids from timelines is cleanup",
+  "spacing": 220,
+  "participants": [
+    { "id": "c", "kind": "client", "label": "Author app" },
+    { "id": "ps", "kind": "service", "label": "Post service" },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL shards" },
+    { "id": "k", "kind": "queue", "label": "Kafka" },
+    { "id": "fw", "kind": "worker", "label": "Fan-out workers" },
+    { "id": "r", "kind": "redis", "label": "Redis" }
+  ],
+  "steps": [
+    { "from": "c", "to": "ps", "label": "DELETE /posts/{id}" },
+    { "from": "ps", "to": "pg", "label": "tx: SET deleted_at + outbox PostDeleted" },
+    { "from": "ps", "to": "r", "label": "SET `post:{id}` tombstone EX 48h" },
+    { "from": "ps", "to": "c", "reply": true, "label": "204" },
+    { "note": "from here on, hydration drops the post\nin every timeline that still holds its id", "over": ["ps", "pg"] },
+    { "section": "async cleanup" },
+    { "from": "pg", "to": "k", "dashed": true, "label": "CDC: PostDeleted, key author_id" },
+    { "from": "k", "to": "fw", "dashed": true, "label": "post.events" },
+    { "from": "fw", "to": "r", "label": "ZREM `ap:{author}`" },
+    { "from": "fw", "to": "pg", "label": "followers pages (as in fan-out)" },
+    { "from": "fw", "to": "r", "label": "pipelined ZREM `tl:{u}` per follower" },
+    { "note": "Timeline nodes consume the same event\nand evict the post from celebrity RAM", "over": ["k", "fw"] }
+  ]
+}

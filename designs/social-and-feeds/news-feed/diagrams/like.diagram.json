@@ -1,0 +1,27 @@
+{
+  "type": "sequence",
+  "title": "News feed: like and the counter",
+  "subtitle": "A row per like decides; counts are a stream summed in 2 s windows",
+  "spacing": 220,
+  "participants": [
+    { "id": "c", "kind": "client", "label": "Reader app" },
+    { "id": "es", "kind": "service", "label": "Engagement service" },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL shard" },
+    { "id": "k", "kind": "queue", "label": "Kafka" },
+    { "id": "agg", "kind": "worker", "label": "Counter aggregator" },
+    { "id": "r", "kind": "redis", "label": "Redis" }
+  ],
+  "steps": [
+    { "from": "c", "to": "es", "label": "PUT /posts/{id}/like" },
+    { "from": "es", "to": "pg", "label": "tx: INSERT likes (no-op if present)" },
+    { "note": "outbox row Liked only if a row was inserted\na second tap writes nothing", "over": ["es", "pg"] },
+    { "from": "es", "to": "c", "reply": true, "label": "204" },
+    { "from": "pg", "to": "k", "dashed": true, "label": "CDC: like.events, key post_id" },
+    { "from": "k", "to": "agg", "dashed": true, "label": "Liked (+1), Unliked (-1)" },
+    { "from": "agg", "to": "agg", "label": "sum deltas per post for 2 s" },
+    { "from": "agg", "to": "r", "label": "HINCRBY `pc:{id}` likes delta" },
+    { "from": "agg", "to": "pg", "label": "UPDATE posts SET like_count += delta" },
+    { "from": "agg", "to": "k", "dashed": true, "label": "commit offset" },
+    { "note": "50K likes/s on one post = one HINCRBY\nand one UPDATE every 2 s", "over": ["k", "agg"] }
+  ]
+}

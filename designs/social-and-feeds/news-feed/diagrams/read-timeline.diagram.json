@@ -2,7 +2,7 @@
   "type": "sequence",
   "title": "News feed: reading the home timeline",
   "subtitle": "Pushed ids from Redis + celebrity posts from RAM, ranked once per session, hydrated per page",
-  "spacing": 270,
+  "spacing": 225,
   "participants": [
     { "id": "c", "kind": "client", "label": "Reader app" },
     { "id": "tl", "kind": "service", "label": "Timeline service" },

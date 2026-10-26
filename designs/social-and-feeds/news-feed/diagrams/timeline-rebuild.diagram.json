@@ -1,0 +1,30 @@
+{
+  "type": "sequence",
+  "title": "News feed: rebuilding a timeline on login",
+  "subtitle": "Mostly Redis round trips, 30-60 ms; a token bucket per node stops a rebuild storm",
+  "spacing": 225,
+  "participants": [
+    { "id": "c", "kind": "client", "label": "Returning user" },
+    { "id": "tl", "kind": "service", "label": "Timeline service" },
+    { "id": "r", "kind": "redis", "label": "Redis" },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL shards" }
+  ],
+  "steps": [
+    { "from": "c", "to": "tl", "label": "GET /timeline" },
+    { "from": "tl", "to": "r", "label": "ZRANGE `tl:{u}`" },
+    { "from": "r", "to": "tl", "reply": true, "label": "empty: key expired" },
+    { "from": "tl", "to": "tl", "label": "take a rebuild token" },
+    { "section": "alt: token granted" },
+    { "from": "tl", "to": "pg", "label": "SELECT followee_id FROM following" },
+    { "from": "tl", "to": "tl", "label": "drop celebrities (pulled at read)" },
+    { "from": "tl", "to": "r", "label": "ZRANGE `ap:{a}` 0 49 REV, pipelined" },
+    { "from": "tl", "to": "pg", "label": "missing `ap:` keys: posts_author_recent" },
+    { "from": "tl", "to": "tl", "label": "k-way merge by time, keep 800" },
+    { "from": "tl", "to": "r", "label": "ZADD `tl:{u}` 800 members, EXPIRE 7d" },
+    { "note": "then the normal read path:\nmerge celebrities, rank, hydrate", "over": ["tl", "r"] },
+    { "section": "alt: bucket empty (rebuild storm)" },
+    { "from": "tl", "to": "r", "label": "`ap:{a}` for top 50 followees only" },
+    { "from": "tl", "to": "c", "reply": true, "label": "degraded first page" },
+    { "from": "tl", "to": "tl", "label": "queue a background rebuild" }
+  ]
+}

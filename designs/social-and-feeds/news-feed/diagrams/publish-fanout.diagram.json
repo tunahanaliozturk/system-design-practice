@@ -1,11 +1,9 @@
 {
   "type": "sequence",
-  "title": "News feed: publish and fan-out",
-  "subtitle": "The post is durable after one transaction; fan-out is async, idempotent, and skips celebrities and inactive users",
-  "spacing": 215,
+  "title": "News feed: fan-out after a post",
+  "subtitle": "Async, idempotent, and skipped entirely for celebrities and inactive followers",
+  "spacing": 225,
   "participants": [
-    { "id": "c", "kind": "client", "label": "Author app" },
-    { "id": "ps", "kind": "service", "label": "Post service" },
     { "id": "pg", "kind": "postgres", "label": "PostgreSQL shard" },
     { "id": "k", "kind": "queue", "label": "Kafka" },
     { "id": "fr", "kind": "worker", "label": "Fan-out router" },
@@ -13,21 +11,18 @@
     { "id": "r", "kind": "redis", "label": "Redis" }
   ],
   "steps": [
-    { "from": "c", "to": "ps", "label": "POST /posts + `Idempotency-Key`, media_ids" },
-    { "note": "BEGIN\nINSERT posts (author_id, client_key) ON CONFLICT DO NOTHING\nINSERT outbox PostCreated\nCOMMIT", "over": ["ps", "pg"] },
-    { "from": "ps", "to": "c", "reply": true, "label": "201 post_id" },
-    { "from": "pg", "to": "k", "dashed": true, "label": "CDC: post.events, key author_id" },
-    { "from": "k", "to": "fr", "dashed": true, "label": "PostCreated" },
+    { "from": "pg", "to": "k", "dashed": true, "label": "CDC: PostCreated, key author_id" },
+    { "from": "k", "to": "fr", "dashed": true, "label": "post.events" },
     { "from": "fr", "to": "r", "label": "ZADD `ap:{author}`, trim to 100" },
     { "section": "alt: normal author (under 1M followers)" },
-    { "from": "fr", "to": "pg", "label": "SELECT follower_id ... LIMIT 1000 (keyset)" },
+    { "from": "fr", "to": "pg", "label": "followers page: LIMIT 1000 (keyset)" },
     { "from": "fr", "to": "k", "dashed": true, "label": "fanout.jobs: post + 1,000 ids" },
     { "from": "k", "to": "fw", "dashed": true, "label": "job" },
     { "from": "fw", "to": "fw", "label": "drop ids not in active bitmap" },
-    { "from": "fw", "to": "r", "label": "pipeline EVALSHA add_if_exists x N" },
-    { "note": "per follower: if EXISTS `tl:{u}` then ZADD + ZREMRANGEBYRANK 0 -801\nmissing key = inactive user, nothing written", "over": ["fw", "r"] },
+    { "from": "fw", "to": "r", "label": "pipelined EVALSHA add_if_exists" },
+    { "note": "per follower: if EXISTS `tl:{u}`\nZADD, then ZREMRANGEBYRANK 0 -801\nmissing key = inactive, nothing written", "over": ["fw", "r"] },
     { "from": "fw", "to": "k", "dashed": true, "label": "commit offset" },
     { "section": "alt: celebrity (1M+ followers)" },
-    { "note": "no fan-out: the `ap:{author}` write above is all\nTimeline nodes read post.events into their in-RAM celebrity cache", "over": ["k", "r"] }
+    { "note": "no fan-out: step 3 is the only write\nTimeline nodes read post.events into RAM", "over": ["k", "fr"] }
   ]
 }
