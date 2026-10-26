@@ -20,7 +20,8 @@ function walk(dir) {
 const files = walk(ROOT);
 const problems = [];
 
-for (const file of files.filter((f) => f.endsWith(".md"))) {
+// The template links to diagrams that only exist once it is copied into a design.
+for (const file of files.filter((f) => f.endsWith(".md") && !relative(ROOT, f).startsWith("template"))) {
   const text = readFileSync(file, "utf8").replace(/```[\s\S]*?```/g, "");
   const targets = [
     ...[...text.matchAll(/\]\(([^)\s]+)\)/g)].map((m) => m[1]),
