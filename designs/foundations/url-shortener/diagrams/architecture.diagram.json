@@ -1,0 +1,40 @@
+{
+  "type": "architecture",
+  "title": "URL shortener: high-level architecture",
+  "subtitle": "PostgreSQL owns the links, every region serves redirects from memory and Redis, clicks flow through Kafka into ClickHouse",
+  "grid": { "top": 112 },
+  "nodes": [
+    { "id": "client", "kind": "client", "label": "Browsers, apps, bots", "col": 0, "row": 1.5, "lines": ["click short links", "dashboard, API keys"] },
+    { "id": "cdn", "kind": "cdn", "label": "CDN edge", "col": 1, "row": 1.5, "lines": ["anycast TLS, WAF", "caches 301s and 404s", "adds country header"] },
+    { "id": "redirect", "kind": "service", "label": "Redirect service", "col": 2, "row": 0.5, "lines": ["in-process LRU, 10 s", "302 + Location", "emits click event"] },
+    { "id": "api", "kind": "service", "label": "Shortener API", "col": 2, "row": 2.6, "lines": ["create, edit, delete", "id blocks, base62", "stats queries"] },
+    { "id": "redis", "kind": "redis", "label": "Redis Cluster", "col": 3, "row": 0, "lines": ["`l:{code}` `l404:{code}`", "~25 GB per region"] },
+    { "id": "replica", "kind": "postgres", "label": "PG read replica", "col": 3, "row": 1, "lines": ["cache-miss lookups", "lag under 1 s"] },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL primary", "col": 3, "row": 2.6, "lines": ["links, idempotency", "id block sequence", "source of truth"] },
+    { "id": "ch", "kind": "nosql", "tag": "CLICKHOUSE", "label": "ClickHouse", "col": 3, "row": 3.85, "lines": ["clicks, 13 months", "clicks_daily rollup"] },
+    { "id": "inval", "kind": "worker", "label": "Cache invalidator", "col": 4, "row": 0, "lines": ["one per region", "DEL on change"] },
+    { "id": "kafka", "kind": "queue", "label": "Kafka", "col": 4, "row": 1.85, "lines": ["`link.clicks` (regional)", "`links.cdc` (home)"] },
+    { "id": "scanner", "kind": "worker", "label": "Abuse scanner", "col": 5, "row": 2.6, "lines": ["sandboxed fetch", "reputation lookups", "periodic rescans"] }
+  ],
+  "edges": [
+    { "from": "client", "to": "cdn", "label": "HTTPS" },
+    { "from": "cdn", "to": "redirect", "route": "hvh", "label": "GET /{code}", "labelSeg": 1 },
+    { "from": "cdn", "to": "api", "route": "hvh", "label": "/api/*", "labelSeg": 1 },
+    { "from": "redirect", "to": "redis", "route": "hvh", "via": 857, "offset": -26, "label": "GET" },
+    { "from": "redirect", "to": "replica", "route": "hvh", "via": 857, "offset": 26, "label": "miss" },
+    { "from": "redirect", "to": "kafka", "route": "hvh", "via": 1147, "offset2": -22, "dashed": true, "label": "click", "labelSeg": 1, "labelPos": 0.45 },
+    { "from": "api", "to": "pg", "label": "tx" },
+    { "from": "pg", "to": "replica", "dashed": true, "label": "WAL" },
+    { "from": "pg", "to": "kafka", "route": "hvh", "via": 1147, "offset": -24, "offset2": 22, "dashed": true, "label": "CDC", "labelSeg": 1 },
+    { "from": "kafka", "to": "inval", "dashed": true, "label": "links.cdc" },
+    { "from": "inval", "to": "redis", "label": "DEL" },
+    { "from": "kafka", "to": "scanner", "route": "hvh", "via": 1437, "dashed": true, "label": "new links", "labelSeg": 1 },
+    { "from": "scanner", "to": "pg", "offset": 26, "label": "status = blocked", "labelPos": 0.6 },
+    { "from": "kafka", "to": "ch", "route": "vh", "offset": 30, "dashed": true, "label": "link.clicks", "labelSeg": 0, "labelPos": 0.8 },
+    { "from": "api", "to": "ch", "route": "vh", "label": "stats SQL", "labelSeg": 1 }
+  ],
+  "groups": [
+    { "label": "EVERY REGION", "nodes": ["redirect", "redis", "replica", "inval"] },
+    { "label": "HOME REGION", "nodes": ["api", "pg", "ch"] }
+  ]
+}

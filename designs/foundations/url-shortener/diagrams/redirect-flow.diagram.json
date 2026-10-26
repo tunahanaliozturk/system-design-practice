@@ -1,0 +1,36 @@
+{
+  "type": "sequence",
+  "title": "URL shortener: the redirect path",
+  "subtitle": "Memory, then Redis, then a replica, then the primary only for codes that could exist; the click event never blocks the 302",
+  "spacing": 205,
+  "participants": [
+    { "id": "b", "kind": "client", "label": "Browser" },
+    { "id": "cdn", "kind": "cdn", "label": "CDN edge" },
+    { "id": "rd", "kind": "service", "label": "Redirect service" },
+    { "id": "r", "kind": "redis", "label": "Redis (region)" },
+    { "id": "rep", "kind": "postgres", "label": "PG replica" },
+    { "id": "pg", "kind": "postgres", "label": "PG primary" },
+    { "id": "k", "kind": "queue", "label": "Kafka (region)" }
+  ],
+  "steps": [
+    { "from": "b", "to": "cdn", "label": "GET /aB3xK9p" },
+    { "from": "cdn", "to": "rd", "label": "GET /aB3xK9p + country header" },
+    { "note": "in-process LRU (10 s TTL): hit for hot links, about 60% of traffic\nmiss: singleflight on the code, one lookup per pod", "at": "rd" },
+    { "from": "rd", "to": "r", "label": "GET `l:aB3xK9p`" },
+    { "from": "r", "to": "rd", "reply": true, "label": "nil (cache miss)" },
+    { "from": "rd", "to": "rep", "label": "SELECT ... WHERE code = $1" },
+    { "from": "rep", "to": "rd", "reply": true, "label": "long_url, type, status, expires_at" },
+    { "from": "rd", "to": "r", "label": "SET `l:aB3xK9p` EX min(86400, until expiry)" },
+    { "note": "status = active and not expired: 302\nexpired or disabled: 410, blocked: warning page", "at": "rd" },
+    { "from": "rd", "to": "k", "dashed": true, "label": "click event (batched, after the response)" },
+    { "from": "rd", "to": "cdn", "reply": true, "label": "302 Location, `Cache-Control: private, max-age=0`" },
+    { "from": "cdn", "to": "b", "reply": true, "label": "302" },
+    { "section": "alt: replica has no row" },
+    { "note": "decode code to id; skip the primary if id is above the allocated high-water mark", "over": ["rd", "rep"] },
+    { "from": "rd", "to": "pg", "label": "SELECT on primary (link younger than replica lag)" },
+    { "from": "pg", "to": "rd", "reply": true, "label": "no row" },
+    { "from": "rd", "to": "r", "label": "SET `l404:aB3xK9p` EX 300" },
+    { "from": "rd", "to": "cdn", "reply": true, "label": "404, `Cache-Control: public, s-maxage=60`" },
+    { "from": "cdn", "to": "b", "reply": true, "label": "404" }
+  ]
+}

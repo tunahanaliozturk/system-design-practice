@@ -1,0 +1,27 @@
+{
+  "type": "architecture",
+  "title": "URL shortener: click analytics pipeline",
+  "subtitle": "Produce locally, fetch across regions in large batches, insert with a dedup token, read from rollups",
+  "grid": { "top": 128 },
+  "nodes": [
+    { "id": "rd", "kind": "service", "label": "Redirect pods", "col": 0, "row": 0, "lines": ["buffer 100k events", "linger 20 ms, lz4", "never block the 302"] },
+    { "id": "rk", "kind": "queue", "label": "Regional Kafka", "col": 1, "row": 0, "lines": ["`link.clicks`", "24 partitions", "3 days retention"] },
+    { "id": "ld", "kind": "worker", "label": "Click loader", "col": 2, "row": 0, "lines": ["one group per region", "bot flag, enrich", "batch = offset range"] },
+    { "id": "raw", "kind": "nosql", "tag": "CLICKHOUSE", "label": "clicks (raw)", "col": 3, "row": 0, "lines": ["ORDER BY (code, ts)", "TTL 13 months"] },
+    { "id": "daily", "kind": "nosql", "tag": "CLICKHOUSE", "label": "clicks_daily", "col": 3, "row": 1.25, "lines": ["SummingMergeTree", "code, day, country"] },
+    { "id": "api", "kind": "service", "label": "Stats endpoint", "col": 2, "row": 1.25, "lines": ["GET .../{code}/stats", "reads rollups only"] },
+    { "id": "dash", "kind": "client", "label": "Owner dashboard", "col": 1, "row": 1.25, "lines": ["charts, CSV export"] }
+  ],
+  "edges": [
+    { "from": "rd", "to": "rk", "dashed": true, "label": "acks=all" },
+    { "from": "rk", "to": "ld", "dashed": true, "label": "fetch" },
+    { "from": "ld", "to": "raw", "label": "INSERT" },
+    { "from": "raw", "to": "daily", "label": "materialized view" },
+    { "from": "api", "to": "daily", "label": "SQL" },
+    { "from": "dash", "to": "api", "label": "HTTPS" }
+  ],
+  "groups": [
+    { "label": "EVERY REGION", "nodes": ["rd", "rk"], "pad": 10 },
+    { "label": "HOME REGION", "nodes": ["ld", "raw", "daily", "api"], "pad": 10 }
+  ]
+}
