@@ -1,0 +1,27 @@
+{
+  "type": "sequence",
+  "title": "Rate limiter: a monthly quota runs out",
+  "subtitle": "Usage is counted asynchronously and the quota is enforced by a pushed block; the rate limit bounds the overshoot",
+  "spacing": 220,
+  "participants": [
+    { "id": "c", "kind": "client", "label": "API client" },
+    { "id": "gw", "kind": "gateway", "label": "Gateways" },
+    { "id": "k", "kind": "queue", "label": "Kafka" },
+    { "id": "agg", "kind": "worker", "label": "Quota aggregator" },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL" }
+  ],
+  "steps": [
+    { "from": "c", "to": "gw", "label": "requests for `ak_42`, all allowed" },
+    { "from": "gw", "to": "k", "dashed": true, "label": "usage `k:42` +1,830, every 10 s" },
+    { "from": "k", "to": "agg", "dashed": true, "label": "add to in-memory total" },
+    { "note": "total 9,999,120 -> 10,000,950\ncrosses the pro quota of 10,000,000", "at": "agg" },
+    { "from": "agg", "to": "k", "dashed": true, "label": "`ratelimit.blocks`: `k:42` until Nov 1" },
+    { "from": "k", "to": "gw", "dashed": true, "label": "block `k:42` (every gateway)" },
+    { "from": "c", "to": "gw", "label": "next request for `ak_42`" },
+    { "from": "gw", "to": "c", "label": "429 quota-exhausted, `Retry-After`" },
+    { "section": "every minute" },
+    { "from": "agg", "to": "pg", "label": "tx: upsert `quota_usage` + offsets" },
+    { "section": "period ends or plan upgrade" },
+    { "from": "agg", "to": "k", "dashed": true, "label": "tombstone for `k:42`" }
+  ]
+}

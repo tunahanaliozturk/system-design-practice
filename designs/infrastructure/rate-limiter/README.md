@@ -248,54 +248,76 @@ without coordination.
 
 ## 6. Request flows
 
+### 6.1 Allowed request
+
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="diagrams/check-flow-dark.png">
-  <img alt="Sequence on one gateway: a rule with a live lease is decided locally, a rule with an empty lease refills from Redis with a Lua take call, an empty bucket returns retry_ms and fills the deny cache, and a Redis timeout falls back to a local bucket" src="diagrams/check-flow-light.png">
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/allowed-flow-dark.png">
+  <img alt="Sequence: the client calls the gateway, which checks the block list and deny cache, spends a leased token for rule r17, refills an empty lease for rule r23 with one Redis take call, forwards upstream, answers with RateLimit headers and later flushes usage to Kafka" src="diagrams/allowed-flow-light.png">
 </picture>
 
-**Allowed request**
+1. Request arrives. Auth gives `plan_id`; rules come from the local index (key override, then plan rule,
+   then default).
+2. Block list and deny cache: in-memory lookups.
+3. r17 has a live lease (leases live 1 s on the monotonic clock): spend one token locally.
+4. r23's lease is empty: one `take` for a batch of 20 (section 7.2). Concurrent requests for the same bucket
+   on this node wait on that call.
+5. Every rule allowed: forward upstream.
+6. Respond with the `RateLimit` headers of the most restrictive rule.
+7. Count the call locally; every 10 s the node flushes one record per key to `ratelimit.usage`.
 
-1. The gateway authenticates the key and gets `plan_id`. It looks up the rules for (plan, route) in its
-   local index, then applies key overrides on top. Order of precedence: key override, plan rule, default.
-2. It checks the block list (quota or emergency blocks) and the deny cache. Both are in-memory lookups.
-3. For each rule, it spends one token from the local lease if the lease has one and has not expired (leases
-   live 1 s on the gateway's monotonic clock).
-4. For a rule with an empty lease, it calls `take` on Redis asking for a batch (section 7.2). Concurrent
-   requests for the same bucket on the same node wait on that one in-flight call instead of sending their
-   own.
-5. If every rule allowed, forward upstream and add the `RateLimit` headers from the most restrictive rule.
-6. Increment the local usage counter for the key. Every 10 s the node flushes one record per key to
-   `ratelimit.usage`.
+### 6.2 Rejected request
 
-**Rejected request**
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/rejected-flow-dark.png">
+  <img alt="Sequence: the first over-limit request costs one Redis take call that returns granted 0 and retry_ms 180; the gateway stores that in its deny cache and rejects later requests in that window without calling Redis" src="diagrams/rejected-flow-light.png">
+</picture>
 
-1. `take` returns `granted 0` and `retry_ms`.
-2. The gateway records "rule r23 for key 42 is empty until now + retry_ms" in its deny cache, so the next
-   thousand requests for that key on this node are rejected without a network call.
-3. Respond `429` with `Retry-After` rounded up to whole seconds. Tokens already spent on other rules for this
-   request are not refunded; a refund call costs more than the token.
+1. Request arrives.
+2. No deny cache entry, lease empty.
+3. `take` returns `granted 0, retry_ms 180`.
+4. Deny cache: r23 for this key is empty until now + 180 ms.
+5. `429` with `Retry-After` rounded up to whole seconds.
+6. The next request for the key arrives within those 180 ms.
+7. Deny cache hit: no Redis call.
+8. `429` again, at the cost of a map lookup.
 
-**Rule change**
+Tokens already spent on other rules for a rejected request are not refunded; a refund call costs more than
+the token.
 
-1. An operator sends `PUT /admin/v1/rules/913` with `shadow: true`. The rules service checks the version,
-   validates (no rule may cut a plan limit by more than 10x without a second approver) and commits the rule
-   and an outbox row in one transaction.
-2. Debezium publishes the outbox row to `ratelimit.rules` keyed by `rule_id`, typically within a second.
-3. Every gateway applies it and rebuilds its index; it also writes the rule set to local disk so a restart
-   with Kafka down still has rules.
-4. In shadow mode the gateway evaluates the rule and counts would-be rejections in the usage records. After
-   a day of looking at those numbers, the operator flips `shadow` to false.
+### 6.3 Rule change
 
-**Quota runs out**
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/rule-change-flow-dark.png">
+  <img alt="Sequence: the admin console PUTs a rule with If-Match, the rules service validates and writes the rule and an outbox row in one PostgreSQL transaction, Debezium publishes it to ratelimit.rules, every gateway applies it, and after a shadow period a second PUT switches enforcement on" src="diagrams/rule-change-flow-light.png">
+</picture>
 
-1. The aggregator consumes usage records, adds them to an in-memory total per (key, month), and every minute
-   upserts `quota_usage` and its partition offsets in one transaction.
-2. The threshold check runs on the in-memory total for every record, not on the minute flush. When the total
-   crosses the plan's quota, it publishes `k:42 -> blocked until 2026-11-01T00:00Z` on `ratelimit.blocks`
-   and sets `blocked_at` in the next flush. After a restart it reloads totals from `quota_usage` and replays
-   from the stored offsets, so nothing is counted twice.
-3. Gateways reject the key locally with `429 quota-exhausted`. At the period boundary, or on a plan upgrade,
-   the aggregator publishes a tombstone.
+1. `PUT` with `If-Match` and `shadow: true`.
+2. Validate; cutting a plan limit by more than 10x needs a second approver.
+3. One transaction: versioned `UPDATE` plus outbox row. Zero rows updated means someone else won: `412`.
+4. Debezium publishes the outbox row to `ratelimit.rules`, keyed by `rule_id`, typically within a second.
+5. Every gateway receives it.
+6. Rebuild the index and write the rule set to local disk, so a restart with Kafka down still has rules.
+7. Shadow mode: would-be rejections are counted in the usage records.
+8. After a day of reading those numbers, a second `PUT` turns enforcement on through steps 3 to 6.
+
+### 6.4 Quota runs out
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/quota-flow-dark.png">
+  <img alt="Sequence: gateways send usage to Kafka every 10 seconds, the quota aggregator adds it to an in-memory total, publishes a block when the total crosses the quota, gateways then reject the key with 429 quota-exhausted, the aggregator persists totals to PostgreSQL every minute and publishes a tombstone at the period end" src="diagrams/quota-flow-light.png">
+</picture>
+
+1. Requests for the key are allowed by the rate limits.
+2. Gateways flush usage per key every 10 s.
+3. The aggregator adds each record to an in-memory total per (key, month) and checks the quota on every
+   record.
+4. Total crosses the quota: publish `k:42` blocked until the period end on `ratelimit.blocks`.
+5. Every gateway receives the block.
+6. The next request for the key arrives.
+7. `429 quota-exhausted`, with `Retry-After` set to the period end.
+8. Every minute: upsert `quota_usage` (and `blocked_at`) with the partition offsets in one transaction. After
+   a restart it reloads totals and replays from those offsets, so nothing is counted twice.
+9. Period end or plan upgrade: a tombstone lifts the block.
 
 Overshoot is bounded by pipeline lag (10 s flush + ~2 s Kafka + ~1 s to process and push the block, so about
 15 s) times the key's rate limit. A free key limited to 10/s can overshoot by at most ~150 calls on a 100k
@@ -372,6 +394,20 @@ return {granted, math.floor(tokens), retry_ms}
 Calling `TIME` inside a script is safe on Redis 7 because scripts replicate their effects (the `HSET`), not
 the script text, so a replica never re-runs the clock read.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/lease-flow-dark.png">
+  <img alt="Sequence: gateways A and B each take batches of 20 tokens from the same Redis bucket; when it runs low A gets a partial grant of 7, B gets 0 with retry_ms 180 and caches the denial, and A later drops 4 unused tokens when its lease expires" src="diagrams/lease-flow-light.png">
+</picture>
+
+1. Three requests reach node A together; its lease for r23 is empty.
+2. A single `take` for 20 serves all three (the other two wait on it).
+3. A spends 3 and keeps 17 for up to 1 s.
+4. Node B leases its own 20 from the same bucket.
+5. Bucket nearly empty: A gets a partial grant of 7.
+6. B gets nothing, plus `retry_ms`.
+7. B caches the denial, so its next requests for this key do not call Redis.
+8. A's traffic stops; after 1 s it drops the 4 tokens it never spent.
+
 **Leases cut the call rate.** A gateway asks for `lease = clamp(floor(rate x 50 ms), 1, floor(burst / (2 x N)))`
 tokens, where N is the number of gateway nodes. A key at 1,000/s with burst 2,000 on 50 nodes leases 20 at a
 time, so Redis sees about 50 calls/s for it instead of 1,000. A login rule at 5 per 15 minutes gets a lease of
@@ -405,9 +441,26 @@ Each rule says what happens when its bucket cannot be reached (`on_failure`):
 | `open` | Allow, count, and log | Read endpoints of paying customers where a false 429 costs more than extra load |
 | `closed` | Reject with `503` and `Retry-After` | Login, password reset, OTP, SMS and email sends: every extra call is fraud risk or money |
 
-Mechanics: one circuit breaker per shard, not per cluster, so a dead shard sends only its slots to local mode.
-The breaker opens when more than 50% of calls in a 1 s window fail or time out, stays open for 2 s, then lets
-a few probe calls through. Local mode is accurate when the load balancer spreads a key evenly; a key whose
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/redis-fallback-dark.png">
+  <img alt="Sequence: a take call to Redis shard 7 times out after 5 ms, the shard's breaker opens for 2 seconds, the gateway decides by the rule's on_failure mode, requests during the open period skip Redis entirely, and after 2 seconds a probe call closes the breaker again" src="diagrams/redis-fallback-light.png">
+</picture>
+
+1. Request arrives.
+2. The gateway asks shard 7's breaker whether the shard is usable: closed, so yes.
+3. `take` goes to shard 7.
+4. No answer in 5 ms: the timeout is recorded; failures are now 61% of the last second.
+5. Above 50%, the breaker opens for 2 s.
+6. The gateway decides this request by the rule's `on_failure` mode.
+7. `local` gives 200 or 429 from the local bucket; `closed` gives 503.
+8. While the breaker is open, requests for keys on shard 7 arrive...
+9. ...and the breaker says skip Redis, so nobody waits 5 ms for a dead shard.
+10. The answer comes straight from `on_failure`.
+11. After 2 s the breaker lets a probe `take` through.
+12. The probe succeeds, the breaker closes and leases come from Redis again.
+
+There is one breaker per shard, not per cluster, so a dead shard sends only its own slots to the fallback.
+Local mode is accurate when the load balancer spreads a key evenly; a key whose
 traffic lands on 5 of 50 nodes gets 10% of its limit. That is the price, and it is why `local` is a fallback
 and not the design.
 

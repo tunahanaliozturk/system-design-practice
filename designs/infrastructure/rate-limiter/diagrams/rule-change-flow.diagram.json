@@ -1,0 +1,27 @@
+{
+  "type": "sequence",
+  "title": "Rate limiter: changing a rule",
+  "subtitle": "PostgreSQL is the only place a rule is edited; the outbox and a compacted topic carry it to every gateway in about a second",
+  "spacing": 220,
+  "participants": [
+    { "id": "a", "kind": "client", "label": "Admin console" },
+    { "id": "rs", "kind": "service", "label": "Rules service" },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL" },
+    { "id": "k", "kind": "queue", "label": "Kafka" },
+    { "id": "gw", "kind": "gateway", "label": "Every gateway" }
+  ],
+  "steps": [
+    { "from": "a", "to": "rs", "label": "PUT rule 913, `If-Match: 7`, shadow" },
+    { "from": "rs", "to": "rs", "label": "validate; big cuts need approval" },
+    { "from": "rs", "to": "pg", "label": "tx: update rule + insert outbox" },
+    { "note": "UPDATE ... SET version = 8 WHERE version = 7\n0 rows means someone else won: 412", "over": ["rs", "pg"] },
+    { "from": "rs", "to": "a", "reply": true, "label": "200, version 8" },
+    { "from": "pg", "to": "k", "dashed": true, "label": "Debezium: `ratelimit.rules`, key 913" },
+    { "from": "k", "to": "gw", "dashed": true, "label": "rule 913 v8" },
+    { "from": "gw", "to": "gw", "label": "rebuild index, snapshot to disk" },
+    { "section": "shadow period, about a day" },
+    { "from": "gw", "to": "k", "dashed": true, "label": "would-reject counts in usage" },
+    { "from": "a", "to": "rs", "label": "PUT rule 913, `If-Match: 8`, enforce" },
+    { "note": "same path as steps 3 to 6:\nenforcement starts within about 2 s", "over": ["rs", "gw"] }
+  ]
+}

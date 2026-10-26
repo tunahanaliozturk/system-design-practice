@@ -1,0 +1,24 @@
+{
+  "type": "sequence",
+  "title": "Rate limiter: a rejected request",
+  "subtitle": "The first rejection costs one Redis call; the deny cache answers the rest locally until the bucket can refill",
+  "spacing": 230,
+  "participants": [
+    { "id": "c", "kind": "client", "label": "API client" },
+    { "id": "gw", "kind": "gateway", "label": "Gateway + limiter" },
+    { "id": "r", "kind": "redis", "label": "Redis shard" }
+  ],
+  "steps": [
+    { "from": "c", "to": "gw", "label": "POST /v1/sms, key `ak_42`" },
+    { "from": "gw", "to": "gw", "label": "deny cache miss, r23 lease empty" },
+    { "from": "gw", "to": "r", "label": "take `{k:42}:r23` want=20" },
+    { "from": "r", "to": "gw", "reply": true, "label": "granted 0, retry_ms 180" },
+    { "from": "gw", "to": "gw", "label": "deny cache: r23 until +180 ms" },
+    { "from": "gw", "to": "c", "label": "429, `Retry-After: 1`" },
+    { "section": "next requests for ak_42 on this node, within 180 ms" },
+    { "from": "c", "to": "gw", "label": "POST /v1/sms, key `ak_42`" },
+    { "from": "gw", "to": "gw", "label": "deny cache hit: no Redis call" },
+    { "from": "gw", "to": "c", "label": "429, `Retry-After: 1`" },
+    { "note": "tokens already spent on other rules\nfor a rejected request are not refunded", "at": "gw" }
+  ]
+}

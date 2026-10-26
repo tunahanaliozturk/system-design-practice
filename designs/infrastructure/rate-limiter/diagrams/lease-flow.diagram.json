@@ -1,0 +1,29 @@
+{
+  "type": "sequence",
+  "title": "Rate limiter: two gateways leasing from one bucket",
+  "subtitle": "Each call takes a batch of tokens atomically, so leases can under-admit but never over-admit",
+  "spacing": 230,
+  "participants": [
+    { "id": "c", "kind": "client", "label": "Requests on node A" },
+    { "id": "a", "kind": "gateway", "label": "Gateway A" },
+    { "id": "r", "kind": "redis", "label": "Bucket r23 in Redis" },
+    { "id": "b", "kind": "gateway", "label": "Gateway B" }
+  ],
+  "steps": [
+    { "note": "r23: 1,000/s, burst 2,000, N = 50 nodes\nlease = clamp(rate x 50 ms, 1, burst / 2N)\n= clamp(50, 1, 20) = 20 tokens", "over": ["a", "b"] },
+    { "from": "c", "to": "a", "label": "3 concurrent requests, lease empty" },
+    { "from": "a", "to": "r", "label": "take want=20 (one call for all 3)" },
+    { "from": "r", "to": "a", "reply": true, "label": "granted 20" },
+    { "from": "a", "to": "a", "label": "spend 3, keep 17, expire in 1 s" },
+    { "from": "b", "to": "r", "label": "take want=20" },
+    { "from": "r", "to": "b", "reply": true, "label": "granted 20" },
+    { "section": "bucket nearly empty" },
+    { "from": "a", "to": "r", "label": "take want=20" },
+    { "from": "r", "to": "a", "reply": true, "label": "granted 7 (partial)" },
+    { "from": "b", "to": "r", "label": "take want=20" },
+    { "from": "r", "to": "b", "reply": true, "label": "granted 0, retry_ms 180" },
+    { "from": "b", "to": "b", "label": "deny cache until +180 ms" },
+    { "section": "a lease outlives its traffic" },
+    { "from": "a", "to": "a", "label": "1 s passed: drop 4 unused tokens" }
+  ]
+}
