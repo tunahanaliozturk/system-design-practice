@@ -1,0 +1,22 @@
+{
+  "type": "architecture",
+  "title": "Ride-hailing: trip state machine",
+  "subtitle": "Every arrow is one UPDATE ... WHERE status = <from>; zero rows means someone else moved the trip first",
+  "nodes": [
+    { "id": "req", "kind": "service", "tag": "STATE", "label": "REQUESTED", "col": 0, "row": 0, "lines": ["quote locked on the row", "one offer at a time"] },
+    { "id": "mat", "kind": "service", "tag": "STATE", "label": "MATCHED", "col": 1, "row": 0, "lines": ["driver_id set", "driver heading to pickup"] },
+    { "id": "arr", "kind": "service", "tag": "STATE", "label": "DRIVER_ARRIVING", "col": 2, "row": 0, "lines": ["within 150 m of pickup", "wait timer running"] },
+    { "id": "inp", "kind": "service", "tag": "STATE", "label": "IN_PROGRESS", "col": 3, "row": 0, "lines": ["path in `trip:path:*`", "rider sees live car"] },
+    { "id": "done", "kind": "postgres", "tag": "STATE", "label": "COMPLETED", "col": 4, "row": 0, "lines": ["final fare", "capture by trip id"] },
+    { "id": "can", "kind": "redis", "tag": "STATE", "label": "CANCELLED", "col": 1.5, "row": 1.6, "lines": ["cancelled_by, reason", "fee if after grace period"] }
+  ],
+  "edges": [
+    { "from": "req", "to": "mat", "label": "accept" },
+    { "from": "mat", "to": "arr", "label": "arrived" },
+    { "from": "arr", "to": "inp", "label": "start" },
+    { "from": "inp", "to": "done", "label": "end trip" },
+    { "from": "req", "to": "can", "route": "vh", "label": "rider, or no driver in 60 s", "labelSeg": 0, "labelPos": 0.55 },
+    { "from": "mat", "to": "can", "label": "rider or driver", "labelPos": 0.45 },
+    { "from": "arr", "to": "can", "label": "no-show 5 min", "labelPos": 0.45 }
+  ]
+}
