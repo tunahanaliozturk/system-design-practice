@@ -1,0 +1,21 @@
+{
+  "type": "architecture",
+  "title": "Hotel booking: booking lifecycle",
+  "subtitle": "Every arrow is one conditional UPDATE ... WHERE status = <from>; zero rows means someone else won",
+  "grid": { "nodeW": 190, "cellW": 340, "rowH": 140 },
+  "nodes": [
+    { "id": "pending", "kind": "service", "tag": "STATE", "label": "PENDING", "col": 0, "row": 0, "lines": ["room held 10 min"] },
+    { "id": "confirmed", "kind": "service", "tag": "STATE", "label": "CONFIRMED", "col": 1, "row": 0, "lines": ["paid, room booked"] },
+    { "id": "completed", "kind": "client", "tag": "TERMINAL", "label": "COMPLETED", "col": 2, "row": 0, "lines": ["stay is over"] },
+    { "id": "expired", "kind": "client", "tag": "TERMINAL", "label": "EXPIRED", "col": 0, "row": 1, "lines": ["hold released"] },
+    { "id": "cancelled", "kind": "service", "tag": "STATE", "label": "CANCELLED", "col": 1, "row": 1, "lines": ["room released"] },
+    { "id": "refunded", "kind": "client", "tag": "TERMINAL", "label": "REFUNDED", "col": 2, "row": 1, "lines": ["money returned"] }
+  ],
+  "edges": [
+    { "from": "pending", "to": "confirmed", "label": "payment webhook" },
+    { "from": "pending", "to": "expired", "label": "hold sweeper" },
+    { "from": "confirmed", "to": "completed", "label": "daily job" },
+    { "from": "confirmed", "to": "cancelled", "label": "customer or hotel" },
+    { "from": "cancelled", "to": "refunded", "label": "refund saga" }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "type": "architecture",
+  "title": "Hotel booking: high-level architecture",
+  "subtitle": "PostgreSQL decides, Redis accelerates, Elasticsearch finds, Kafka carries the news",
+  "nodes": [
+    { "id": "client", "kind": "client", "label": "Web and mobile", "col": 0, "row": 1.5, "lines": ["Idempotency-Key on writes"] },
+    { "id": "gw", "kind": "gateway", "label": "API gateway", "col": 1, "row": 1.5, "lines": ["auth, rate limit", "TLS, routing"] },
+    { "id": "search", "kind": "service", "label": "Search service", "col": 2, "row": 0, "lines": ["ES candidates", "+ Redis availability"] },
+    { "id": "pricing", "kind": "service", "label": "Pricing service", "col": 2, "row": 1, "lines": ["rules engine", "issues quotes"] },
+    { "id": "booking", "kind": "service", "label": "Booking service", "col": 2, "row": 2, "lines": ["holds, state machine", "writes outbox"] },
+    { "id": "payment", "kind": "service", "label": "Payment service", "col": 2, "row": 3, "lines": ["intents, webhooks", "refunds"] },
+    { "id": "psp", "kind": "external", "label": "Payment provider", "col": 1, "row": 3, "lines": ["Stripe, Adyen, ..."] },
+    { "id": "es", "kind": "search", "label": "hotels index", "col": 3, "row": 0, "lines": ["geo, filters, text"] },
+    { "id": "redis", "kind": "redis", "label": "Redis Cluster", "col": 3, "row": 1, "lines": ["`avail:*` `quote:*`", "`hold:*` counters"] },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL", "col": 3, "row": 2.5, "h": 150, "lines": ["room_inventory", "bookings, payments", "outbox", "source of truth"] },
+    { "id": "sweeper", "kind": "worker", "label": "Hold sweeper", "col": 3, "row": 3.85, "lines": ["expires PENDING", "reconciles payments"] },
+    { "id": "kafka", "kind": "queue", "label": "Kafka", "col": 4, "row": 2.5, "lines": ["booking.events", "cdc.room_inventory", "cdc.hotels"] },
+    { "id": "updater", "kind": "worker", "label": "Availability updater", "col": 5, "row": 0.5, "lines": ["rewrites `avail:*`", "bulk-indexes hotels"] },
+    { "id": "notify", "kind": "service", "label": "Notification service", "col": 5, "row": 2.5, "lines": ["email, SMS, push", "dedup on event_id"] },
+    { "id": "channels", "kind": "external", "label": "Email, SMS, push", "col": 5, "row": 3.85, "lines": ["SES, Twilio, FCM"] }
+  ],
+  "edges": [
+    { "from": "client", "to": "gw", "label": "HTTPS" },
+    { "from": "gw", "to": "search", "route": "hvh", "label": "GET /search", "labelSeg": 1 },
+    { "from": "gw", "to": "pricing", "route": "hvh", "label": "POST /quotes", "labelSeg": 1, "labelPos": 0.3 },
+    { "from": "gw", "to": "booking", "route": "hvh", "label": "POST /bookings", "labelSeg": 1, "labelPos": 0.75 },
+    { "from": "search", "to": "es", "label": "query" },
+    { "from": "search", "to": "redis", "route": "hvh", "via": 845, "offset": 20, "offset2": -22, "labelPos": 0.6, "label": "MGET" },
+    { "from": "pricing", "to": "redis", "label": "quote" },
+    { "from": "booking", "to": "pg", "offset": -20, "label": "tx: hold" },
+    { "from": "booking", "to": "redis", "route": "hvh", "via": 875, "offset": -24, "offset2": 24, "labelPos": 0.42, "label": "hold TTL" },
+    { "from": "payment", "to": "pg", "offset": 0, "label": "tx: confirm" },
+    { "from": "psp", "to": "payment", "both": true, "label": "webhook" },
+    { "from": "pg", "to": "kafka", "dashed": true, "label": "Debezium CDC" },
+    { "from": "sweeper", "to": "pg", "label": "expired holds" },
+    { "from": "kafka", "to": "updater", "route": "vhv", "dashed": true, "via": 380, "labelPos": 0.85 },
+    { "from": "kafka", "to": "notify", "dashed": true, "label": "booking.*" },
+    { "from": "updater", "to": "redis", "route": "hvh", "via": 1440, "offset": 20, "label": "avail", "labelPos": 0.75 },
+    { "from": "updater", "to": "es", "route": "hvh", "via": 1440, "offset": -20, "label": "bulk", "labelPos": 0.75 },
+    { "from": "notify", "to": "channels" }
+  ]
+}

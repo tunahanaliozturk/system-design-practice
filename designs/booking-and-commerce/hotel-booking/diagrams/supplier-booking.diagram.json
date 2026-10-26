@@ -1,0 +1,27 @@
+{
+  "type": "sequence",
+  "title": "Hotel booking: booking with an external supplier",
+  "subtitle": "A timeout is not a failure; it is UNKNOWN, and the reconciler asks before anyone books again",
+  "spacing": 225,
+  "participants": [
+    { "id": "b", "kind": "service", "label": "Booking service" },
+    { "id": "gw", "kind": "service", "label": "Supplier gateway" },
+    { "id": "r", "kind": "redis", "label": "Redis" },
+    { "id": "s", "kind": "external", "label": "Supplier API" },
+    { "id": "k", "kind": "queue", "label": "Kafka" },
+    { "id": "rec", "kind": "worker", "label": "Reconciler" }
+  ],
+  "steps": [
+    { "from": "b", "to": "gw", "label": "book, our_ref = booking_id" },
+    { "from": "gw", "to": "r", "label": "breaker `cb:{supplier}`, token `rl:{supplier}` (Lua)" },
+    { "from": "gw", "to": "s", "label": "create reservation, ref = our_ref, 10 s timeout" },
+    { "from": "s", "to": "gw", "reply": true, "label": "200: supplier_ref -> CONFIRMED" },
+    { "section": "alt: timeout or 5xx" },
+    { "note": "supplier_bookings.status = UNKNOWN, next_check_at = now() + 30 s", "at": "gw" },
+    { "from": "gw", "to": "k", "dashed": true, "label": "supplier.reconcile (key booking_id)" },
+    { "from": "k", "to": "rec", "dashed": true, "label": "consume" },
+    { "from": "rec", "to": "s", "label": "lookup by our_ref (30 s, 2 min, 10 min, 1 h)" },
+    { "from": "s", "to": "rec", "reply": true, "label": "found / not found" },
+    { "note": "found: CONFIRMED, store supplier_ref\nnot found after the supplier's cut-off: safe to retry or FAILED\nstill unknown after N tries: supplier.dlq and a human", "at": "rec" }
+  ]
+}

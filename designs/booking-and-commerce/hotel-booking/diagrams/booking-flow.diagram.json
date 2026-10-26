@@ -1,0 +1,31 @@
+{
+  "type": "sequence",
+  "title": "Hotel booking: hold, pay, confirm",
+  "subtitle": "One conditional UPDATE per night decides who gets the room; the webhook confirms in one transaction",
+  "spacing": 215,
+  "participants": [
+    { "id": "c", "kind": "client", "label": "Client" },
+    { "id": "b", "kind": "service", "label": "Booking service" },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL" },
+    { "id": "r", "kind": "redis", "label": "Redis" },
+    { "id": "pay", "kind": "service", "label": "Payment service" },
+    { "id": "psp", "kind": "external", "label": "Payment provider" }
+  ],
+  "steps": [
+    { "from": "c", "to": "b", "label": "POST /bookings + `Idempotency-Key`" },
+    { "from": "b", "to": "pg", "label": "INSERT idempotency_keys" },
+    { "note": "BEGIN\nUPDATE room_inventory SET held = held + 1 ... AND booked + held < total  (per night)\nINSERT bookings (PENDING, hold_expires_at = now() + 10 min), INSERT outbox\nCOMMIT", "over": ["b", "pg"] },
+    { "from": "b", "to": "r", "label": "SET `hold:{id}` EX 600, ZADD `holds:expiring`" },
+    { "from": "b", "to": "psp", "label": "create intent, idempotency key = booking_id" },
+    { "from": "b", "to": "c", "reply": true, "label": "201 PENDING + payment_url" },
+    { "section": "customer pays on the provider page" },
+    { "from": "psp", "to": "pay", "label": "webhook payment.succeeded (signed)" },
+    { "from": "pay", "to": "pg", "label": "INSERT processed_webhooks ON CONFLICT DO NOTHING" },
+    { "note": "BEGIN\nheld - 1, booked + 1 per night; bookings.status = CONFIRMED WHERE status = PENDING\npayments CAPTURED; outbox booking.confirmed\nCOMMIT", "over": ["pg", "pay"] },
+    { "from": "pay", "to": "psp", "reply": true, "label": "200 OK" },
+    { "section": "alt: hold expired before payment" },
+    { "from": "r", "to": "b", "dashed": true, "label": "sweeper: ZRANGEBYSCORE 0 now" },
+    { "from": "b", "to": "pg", "label": "EXPIRED where PENDING; held - 1" },
+    { "from": "b", "to": "psp", "label": "cancel intent" }
+  ]
+}

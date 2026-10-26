@@ -1,0 +1,28 @@
+{
+  "type": "architecture",
+  "title": "Hotel booking: search read path and how it stays fresh",
+  "subtitle": "Search never touches the primary; changes reach Redis and Elasticsearch through CDC within seconds",
+  "nodes": [
+    { "id": "client", "kind": "client", "label": "Web and mobile", "col": 0, "row": 1, "lines": ["GET /search?city=..."] },
+    { "id": "search", "kind": "service", "label": "Search service", "col": 1, "row": 1, "lines": ["merge, filter, sort", "cursor paging"] },
+    { "id": "es", "kind": "search", "label": "hotels index", "col": 2, "row": 0, "lines": ["geo_point, stars,", "amenities, base_price"] },
+    { "id": "redis", "kind": "redis", "label": "Redis Cluster", "col": 2, "row": 1, "lines": ["`avail:{hotel}:{night}`", "`search:{sha1}` 60 s"] },
+    { "id": "replica", "kind": "postgres", "label": "Read replica", "col": 2, "row": 2, "lines": ["fallback on miss", "backfills Redis"] },
+    { "id": "indexer", "kind": "worker", "label": "Indexer", "col": 3, "row": 0, "lines": ["bulk upsert every 1 s"] },
+    { "id": "updater", "kind": "worker", "label": "Availability updater", "col": 3, "row": 1, "lines": ["rewrites one hash", "per hotel-night"] },
+    { "id": "kafka", "kind": "queue", "label": "Kafka", "col": 4, "row": 1, "lines": ["cdc.room_inventory", "cdc.room_rates", "cdc.hotels"] },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL primary", "col": 5, "row": 1, "lines": ["room_inventory", "room_rates, hotels"] }
+  ],
+  "edges": [
+    { "from": "client", "to": "search", "step": 1, "label": "GET /search" },
+    { "from": "search", "to": "es", "route": "hvh", "via": 560, "offset": -22, "step": 2, "label": "top 200 ids", "labelSeg": 1 },
+    { "from": "search", "to": "redis", "step": 3, "label": "MGET" },
+    { "from": "search", "to": "replica", "route": "hvh", "via": 575, "offset": 22, "step": 4, "label": "on miss", "labelSeg": 1 },
+    { "from": "pg", "to": "kafka", "dashed": true, "label": "Debezium" },
+    { "from": "kafka", "to": "updater", "dashed": true },
+    { "from": "kafka", "to": "indexer", "route": "hvh", "via": 1150, "offset": -26, "dashed": true },
+    { "from": "updater", "to": "redis", "label": "HSET" },
+    { "from": "indexer", "to": "es", "label": "_bulk" },
+    { "from": "pg", "to": "replica", "route": "vhv", "via": 378, "label": "streaming replication", "labelSeg": 1, "labelPos": 0.35 }
+  ]
+}
