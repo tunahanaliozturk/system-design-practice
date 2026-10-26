@@ -1,0 +1,27 @@
+{
+  "type": "sequence",
+  "title": "Hotel booking: late and missing payment results",
+  "subtitle": "The provider is the authority on whether money moved; we never guess",
+  "spacing": 225,
+  "participants": [
+    { "id": "psp", "kind": "external", "label": "Payment provider" },
+    { "id": "pay", "kind": "service", "label": "Payment service" },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL" },
+    { "id": "rec", "kind": "worker", "label": "Reconciler" }
+  ],
+  "steps": [
+    { "section": "payment succeeds after the hold expired" },
+    { "from": "psp", "to": "pay", "label": "webhook payment.succeeded" },
+    { "from": "pay", "to": "pg", "label": "INSERT processed_webhooks (dedup)" },
+    { "from": "pay", "to": "pg", "label": "CONFIRMED WHERE status = PENDING" },
+    { "from": "pg", "to": "pay", "reply": true, "label": "0 rows: booking is EXPIRED" },
+    { "from": "pay", "to": "pg", "label": "try re-hold: conditional UPDATE per night" },
+    { "note": "room still free: re-hold and CONFIRMED in one transaction\nroom gone: refund below, outbox booking.refunded", "at": "pg" },
+    { "from": "pay", "to": "psp", "label": "refund, idempotency key = booking_id" },
+    { "section": "webhook never arrives" },
+    { "from": "rec", "to": "pg", "label": "PENDING bookings older than 15 min" },
+    { "from": "rec", "to": "psp", "label": "GET payment intent for booking_id" },
+    { "from": "psp", "to": "rec", "reply": true, "label": "succeeded / failed / still open" },
+    { "note": "succeeded: run the confirm transaction\nfailed or expired: EXPIRED, release held\nstill open: check again later", "at": "rec" }
+  ]
+}

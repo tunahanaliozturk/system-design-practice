@@ -285,7 +285,7 @@ function renderSequence(spec, t) {
   const bottom = y + 6;
 
   const body = [];
-  let noteRight = 0;
+  let noteRight = 0; // right edge of notes and message labels, so the canvas grows to fit them
   for (const p of ps.values()) {
     const accent = t.kinds[p.kind] ?? t.kinds.service;
     body.push(`<line x1="${p.x}" y1="${top + boxH}" x2="${p.x}" y2="${bottom}" stroke="${t.line}" stroke-width="1.4" stroke-dasharray="4 5"/>`);
@@ -320,10 +320,12 @@ function renderSequence(spec, t) {
       if (a === b) {
         body.push(`<path d="M${a} ${r.y} H${a + 40} V${r.y + 22} H${a + 4}" fill="none" stroke="${t.edge}" stroke-width="1.6" ${dash} marker-end="url(#head)"/>`);
         body.push(labelLeft(a + 48, r.y + 15, s.label, r.num, t));
+        noteRight = Math.max(noteRight, a + 48 + 25 + textWidth(s.label ?? "", 14));
       } else {
         const dir = b > a ? 1 : -1;
         body.push(`<line x1="${a}" y1="${r.y + 14}" x2="${b - dir * 2}" y2="${r.y + 14}" stroke="${t.edge}" stroke-width="1.6" ${dash} marker-end="url(#head)"/>`);
         body.push(labelLeft(Math.min(a, b) + 10, r.y, s.label, r.num, t));
+        noteRight = Math.max(noteRight, Math.min(a, b) + 10 + 25 + textWidth(s.label ?? "", 14));
       }
     }
   }

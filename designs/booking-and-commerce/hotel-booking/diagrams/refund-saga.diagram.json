@@ -1,0 +1,26 @@
+{
+  "type": "sequence",
+  "title": "Hotel booking: cancellation and refund saga",
+  "subtitle": "Each step is stored before it runs, so a crash resumes from the last step instead of starting over",
+  "spacing": 215,
+  "participants": [
+    { "id": "c", "kind": "client", "label": "Client" },
+    { "id": "b", "kind": "service", "label": "Booking service" },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL" },
+    { "id": "k", "kind": "queue", "label": "Kafka" },
+    { "id": "saga", "kind": "worker", "label": "Saga orchestrator" },
+    { "id": "psp", "kind": "external", "label": "Payment provider" }
+  ],
+  "steps": [
+    { "from": "c", "to": "b", "label": "POST /bookings/{id}/cancel" },
+    { "from": "b", "to": "pg", "label": "tx: CANCELLED WHERE CONFIRMED + outbox" },
+    { "from": "b", "to": "c", "reply": true, "label": "200 CANCELLED, refund on its way" },
+    { "from": "pg", "to": "k", "dashed": true, "label": "Debezium: booking.cancelled" },
+    { "from": "k", "to": "saga", "dashed": true, "label": "consume" },
+    { "from": "saga", "to": "pg", "label": "RELEASE_INVENTORY: booked - 1 per night" },
+    { "from": "saga", "to": "psp", "label": "REFUND_PAYMENT, key = booking_id" },
+    { "from": "psp", "to": "saga", "dashed": true, "label": "refund webhook" },
+    { "from": "saga", "to": "pg", "label": "tx: REFUNDED + outbox booking.refunded" },
+    { "note": "any step fails: retry from the stored step with backoff\nafter N attempts: FAILED and a support ticket\nreleased inventory is never taken back", "over": ["pg", "saga"] }
+  ]
+}

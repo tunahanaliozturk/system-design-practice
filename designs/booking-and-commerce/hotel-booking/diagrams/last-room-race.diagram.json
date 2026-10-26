@@ -1,0 +1,23 @@
+{
+  "type": "sequence",
+  "title": "Hotel booking: two users race for the last room",
+  "subtitle": "The row lock serialises the two updates; the loser re-checks the condition and updates zero rows",
+  "spacing": 230,
+  "participants": [
+    { "id": "a", "kind": "client", "label": "User A" },
+    { "id": "b", "kind": "client", "label": "User B" },
+    { "id": "s", "kind": "service", "label": "Booking service" },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL" }
+  ],
+  "steps": [
+    { "from": "a", "to": "s", "label": "POST /bookings (night 12 Nov)" },
+    { "from": "b", "to": "s", "label": "POST /bookings (same night)" },
+    { "from": "s", "to": "pg", "label": "tx A: UPDATE ... held + 1 WHERE booked + held < total" },
+    { "from": "s", "to": "pg", "label": "tx B: same UPDATE" },
+    { "note": "tx A holds the row lock, tx B waits on it\nroom_inventory: total 20, booked 19, held 0", "at": "pg" },
+    { "from": "pg", "to": "s", "reply": true, "label": "tx A: 1 row, COMMIT (held = 1)" },
+    { "from": "pg", "to": "s", "reply": true, "label": "tx B: re-check 19 + 1 < 20 is false, 0 rows, ROLLBACK" },
+    { "from": "s", "to": "a", "reply": true, "label": "201 PENDING, pay within 10 min" },
+    { "from": "s", "to": "b", "reply": true, "label": "409 sold out" }
+  ]
+}

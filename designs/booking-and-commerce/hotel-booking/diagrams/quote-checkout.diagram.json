@@ -1,0 +1,28 @@
+{
+  "type": "sequence",
+  "title": "Hotel booking: quote, campaign quota, checkout",
+  "subtitle": "The customer pays the quoted price; the campaign counter is atomic in Redis and durable in PostgreSQL",
+  "spacing": 215,
+  "participants": [
+    { "id": "c", "kind": "client", "label": "Client" },
+    { "id": "p", "kind": "service", "label": "Pricing service" },
+    { "id": "r", "kind": "redis", "label": "Redis" },
+    { "id": "b", "kind": "service", "label": "Booking service" },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL" }
+  ],
+  "steps": [
+    { "from": "c", "to": "p", "label": "POST /quotes (coupon WINTER30)" },
+    { "from": "p", "to": "p", "label": "base x season x occupancy, segment, campaign, coupon, tax" },
+    { "from": "p", "to": "r", "label": "SET `quote:{id}` EX 900 (total, rule versions)" },
+    { "from": "p", "to": "c", "reply": true, "label": "201 quote_id, total 267.00 EUR" },
+    { "section": "checkout within 15 minutes" },
+    { "from": "c", "to": "b", "label": "POST /bookings { quote_id }" },
+    { "from": "b", "to": "r", "label": "GET `quote:{id}`, check user and request match" },
+    { "from": "b", "to": "r", "label": "EVAL decrement `campaign:{id}:remaining`" },
+    { "note": "-1: campaign is over, re-price and show \"price changed\"", "at": "r" },
+    { "from": "b", "to": "pg", "label": "tx: hold nights, booking + price_snapshot, redemption" },
+    { "section": "alt: payment fails or the hold expires" },
+    { "from": "b", "to": "r", "label": "INCR `campaign:{id}:remaining`" },
+    { "from": "b", "to": "pg", "label": "DELETE the campaign_redemptions row" }
+  ]
+}

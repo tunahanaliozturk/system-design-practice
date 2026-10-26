@@ -269,6 +269,11 @@ WHERE hotel_id = $1 AND room_type_id = $2 AND night = $3
   AND booked + held < total;
 ```
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/last-room-race-dark.png">
+  <img alt="Sequence: users A and B both request the last room. Both conditional updates reach PostgreSQL; A takes the row lock and commits, B re-checks the condition after A commits, updates zero rows and rolls back, so A gets 201 and B gets 409 sold out." src="diagrams/last-room-race-light.png">
+</picture>
+
 Why this works: two transactions racing for the last room both try to update the same row. PostgreSQL
 serialises them on the row lock. The second one re-evaluates `booked + held < total` after the first
 commits, finds it false, and updates zero rows. The `CHECK (booked + held <= total)` constraint is a
@@ -306,6 +311,11 @@ Three layers of dedup, each enforced by a unique constraint rather than a "check
 | Client retry, double click | `(user_id, Idempotency-Key)` | `idempotency_keys` primary key |
 | Our retry to the provider | `booking_id` as the provider's idempotency key | The provider |
 | Provider redelivering a webhook | `provider_event_id` | `processed_webhooks` primary key |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/late-payment-dark.png">
+  <img alt="Sequence: a payment webhook arrives after the hold expired, the confirm update matches zero rows, the service tries to re-hold the nights and refunds if the room is gone. A second part shows the reconciler asking the provider about bookings whose webhook never arrived." src="diagrams/late-payment-light.png">
+</picture>
 
 The confirm transaction is also a conditional update: `UPDATE bookings SET status = 'CONFIRMED' WHERE id =
 $1 AND status = 'PENDING'`. If the sweeper expired the booking a second earlier, this updates zero rows
@@ -401,6 +411,11 @@ CREATE TABLE campaign_redemptions (
 );
 ```
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/quote-checkout-dark.png">
+  <img alt="Sequence: the pricing service computes a quote and stores it in Redis for 15 minutes; at checkout the booking service reads the quote, decrements the campaign counter atomically and writes the booking with its price snapshot and the redemption row; on payment failure the counter is incremented back and the redemption deleted." src="diagrams/quote-checkout-light.png">
+</picture>
+
 "First 1,000 bookings" must never redeem 1,001 times. The fast path is an atomic decrement in Redis; the
 durable record is `campaign_redemptions`, written inside the booking transaction.
 
@@ -485,6 +500,11 @@ consumer dedups on `event_id`.
 channel. Dedup is two-layered: `SET sent:{event_id}:{channel} NX EX 604800` in Redis as the fast check,
 and a `notifications` table with `PRIMARY KEY (event_id, channel)` as the durable one. Failures go to
 `notification.retry` with backoff, then `notification.dlq` with an alert on the oldest message age.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/refund-saga-dark.png">
+  <img alt="Sequence: the client cancels, the booking service writes CANCELLED and an outbox event in one transaction, Debezium publishes it, the saga orchestrator releases inventory, asks the provider for a refund keyed by booking id, waits for the refund webhook and marks the booking REFUNDED." src="diagrams/refund-saga-light.png">
+</picture>
 
 **Refund saga (orchestrated).** Cancel writes `CANCELLED` plus `booking.cancelled`. The orchestrator
 creates a `refund_sagas` row and walks the steps: release inventory (`booked - 1` per night), call the
