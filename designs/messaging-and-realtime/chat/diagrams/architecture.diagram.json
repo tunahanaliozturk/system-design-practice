@@ -1,0 +1,41 @@
+{
+  "type": "architecture",
+  "title": "Chat system: high-level architecture",
+  "subtitle": "Gateways hold the sockets, Kafka orders each conversation, ScyllaDB keeps the messages, Redis knows where every device is",
+  "nodes": [
+    { "id": "client", "kind": "client", "label": "Phone, web, desktop", "col": 0, "row": 1, "lines": ["1 WebSocket per device", "local DB, cursor per conv"] },
+    { "id": "lb", "kind": "gateway", "label": "L4 load balancer", "col": 1, "row": 1, "lines": ["WSS and HTTPS", "least connections"] },
+    { "id": "gw", "kind": "service", "tag": "STATEFUL", "label": "Chat gateways", "col": 2, "row": 0, "lines": ["~850 nodes x 250K sockets", "heartbeats, typing", "session register"] },
+    { "id": "kafka", "kind": "queue", "label": "Kafka", "col": 3, "row": 0, "lines": ["`chat.inbound`", "`chat.persisted`", "`chat.receipts`", "`push.requests`"] },
+    { "id": "msg", "kind": "service", "label": "Message service", "col": 4, "row": 0, "lines": ["one owner per partition", "seq = Kafka offset", "dedupe `client_msg_id`"] },
+    { "id": "redis", "kind": "redis", "label": "Redis Cluster", "col": 2, "row": 1.4, "lines": ["`sess:{user}` registry", "`members:{conv}` cache", "presence pub/sub"] },
+    { "id": "fanout", "kind": "worker", "label": "Fan-out workers", "col": 3, "row": 1.4, "lines": ["members to devices", "one batch per gateway", "offline: push request"] },
+    { "id": "cass", "kind": "nosql", "tag": "SCYLLADB", "label": "Message store", "col": 4, "row": 1.4, "lines": ["`messages` by conversation", "`user_conversations`", "`read_state`, `client_msgs`"] },
+    { "id": "s3", "kind": "storage", "label": "S3 media bucket", "col": 0, "row": 2.8, "lines": ["encrypted blobs", "lifecycle to IA tier"] },
+    { "id": "cdn", "kind": "cdn", "label": "CDN", "col": 1, "row": 2.8, "lines": ["signed URLs", "origin = S3"] },
+    { "id": "api", "kind": "service", "label": "Sync and history API", "col": 2, "row": 2.8, "lines": ["conversation index", "messages after seq N", "pre-signs media PUT"] },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL (sharded)", "col": 2, "row": 4.1, "lines": ["users, devices", "conversations, members"] },
+    { "id": "push", "kind": "worker", "label": "Push workers", "col": 3, "row": 4.1, "lines": ["collapse per conversation", "no message text in payload"] },
+    { "id": "apns", "kind": "external", "label": "APNs and FCM", "col": 4, "row": 4.1, "lines": ["wake the app"] }
+  ],
+  "edges": [
+    { "from": "client", "to": "lb", "both": true, "label": "WSS, HTTPS" },
+    { "from": "lb", "to": "gw", "route": "hvh", "via": 567, "label": "WebSocket", "labelSeg": 1 },
+    { "from": "lb", "to": "api", "route": "hvh", "via": 567, "label": "REST", "labelSeg": 1 },
+    { "from": "gw", "to": "kafka", "offset": -20, "label": "produce" },
+    { "from": "kafka", "to": "msg", "dashed": true, "offset": -20, "label": "inbound" },
+    { "from": "msg", "to": "kafka", "dashed": true, "offset": 20, "label": "persisted" },
+    { "from": "msg", "to": "cass", "label": "QUORUM write" },
+    { "from": "kafka", "to": "fanout", "dashed": true, "label": "persisted" },
+    { "from": "fanout", "to": "redis", "offset": 18, "label": "lookup" },
+    { "from": "fanout", "to": "gw", "route": "hvh", "via": 857, "offset": -28, "offset2": 22, "label": "deliver", "labelSeg": 1, "labelPos": 0.35 },
+    { "from": "gw", "to": "redis", "both": true, "offset": -40, "label": "sessions, presence" },
+    { "from": "api", "to": "cass", "route": "hvh", "via": 1147, "label": "range reads", "labelSeg": 1, "labelPos": 0.5 },
+    { "from": "api", "to": "pg", "label": "SQL" },
+    { "from": "fanout", "to": "push", "dashed": true, "label": "`push.requests`", "labelPos": 0.75 },
+    { "from": "push", "to": "apns" },
+    { "from": "client", "to": "s3", "label": "PUT pre-signed" },
+    { "from": "client", "to": "cdn", "route": "hvh", "via": 277, "offset": 25, "offset2": -18, "label": "GET media", "labelSeg": 1 },
+    { "from": "cdn", "to": "s3", "offset": 18, "label": "origin" }
+  ]
+}
