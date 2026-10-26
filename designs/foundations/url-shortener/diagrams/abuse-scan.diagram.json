@@ -1,0 +1,25 @@
+{
+  "type": "sequence",
+  "title": "URL shortener: asynchronous abuse scan",
+  "subtitle": "Scan every new or edited destination; a verdict is one versioned UPDATE that rides the normal invalidation path",
+  "spacing": 225,
+  "participants": [
+    { "id": "k", "kind": "queue", "label": "Kafka `links.cdc`" },
+    { "id": "sc", "kind": "worker", "label": "Abuse scanner" },
+    { "id": "sb", "kind": "worker", "label": "Sandbox fetcher" },
+    { "id": "rep", "kind": "external", "label": "Reputation services" },
+    { "id": "pg", "kind": "postgres", "label": "PG primary" }
+  ],
+  "steps": [
+    { "from": "k", "to": "sc", "dashed": true, "label": "insert or edit (code, version, long_url)" },
+    { "from": "sc", "to": "sb", "label": "fetch, follow up to 5 redirects" },
+    { "from": "sb", "to": "sc", "reply": true, "label": "final URL, page signals" },
+    { "from": "sc", "to": "rep", "label": "check final URL and domain" },
+    { "from": "rep", "to": "sc", "reply": true, "label": "verdict: phishing" },
+    { "from": "sc", "to": "pg", "label": "SET status = 'blocked' WHERE version = $2" },
+    { "note": "0 rows: edited since the scan\nthe newer version has its own scan queued", "over": ["sc", "pg"] },
+    { "from": "pg", "to": "k", "dashed": true, "label": "CDC update: invalidators DEL caches" },
+    { "section": "later: destinations change after the first scan" },
+    { "note": "rescan active links every 30 days\nrescan at once when clicks pass 1,000 a minute\nuser reports go to a review queue", "over": ["sc", "rep"] }
+  ]
+}

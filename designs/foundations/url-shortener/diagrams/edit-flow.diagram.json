@@ -1,0 +1,26 @@
+{
+  "type": "sequence",
+  "title": "URL shortener: edit or takedown",
+  "subtitle": "One versioned UPDATE, then CDC fans the change out to every region's cache",
+  "spacing": 220,
+  "participants": [
+    { "id": "o", "kind": "client", "label": "Owner" },
+    { "id": "api", "kind": "service", "label": "Shortener API" },
+    { "id": "pg", "kind": "postgres", "label": "PG primary" },
+    { "id": "k", "kind": "queue", "label": "Kafka" },
+    { "id": "inv", "kind": "worker", "label": "Invalidator (region)" },
+    { "id": "r", "kind": "redis", "label": "Redis (region)" }
+  ],
+  "steps": [
+    { "from": "o", "to": "api", "label": "PATCH /api/v1/links/{code}, If-Match: \"3\"" },
+    { "from": "api", "to": "pg", "label": "UPDATE ... version = 4 WHERE version = 3" },
+    { "from": "pg", "to": "api", "reply": true, "label": "1 row (0 rows: 412 to the owner)" },
+    { "from": "api", "to": "o", "reply": true, "label": "200 { version: 4 }" },
+    { "from": "pg", "to": "k", "dashed": true, "label": "CDC update on `links.cdc`, key = code" },
+    { "from": "k", "to": "inv", "dashed": true, "label": "one consumer group per region" },
+    { "from": "inv", "to": "r", "label": "DEL `l:{code}`" },
+    { "note": "301 link: also purge the CDN URL\npods drop memory copies within 10 s\nabout 12 s end to end at p99", "over": ["inv", "r"] },
+    { "section": "takedown by the abuse scanner" },
+    { "note": "the scanner runs the same UPDATE with status = 'blocked'\nsteps 3 to 5 are identical", "over": ["api", "k"] }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "type": "sequence",
+  "title": "URL shortener: creating a link",
+  "subtitle": "One transaction holds the idempotency row and the link; the abuse scan and cache cleanup follow through CDC",
+  "spacing": 220,
+  "participants": [
+    { "id": "c", "kind": "client", "label": "Client" },
+    { "id": "api", "kind": "service", "label": "Shortener API" },
+    { "id": "r", "kind": "redis", "label": "Redis (home)" },
+    { "id": "pg", "kind": "postgres", "label": "PG primary" },
+    { "id": "k", "kind": "queue", "label": "Kafka" },
+    { "id": "sc", "kind": "worker", "label": "Abuse scanner" }
+  ],
+  "steps": [
+    { "from": "c", "to": "api", "label": "POST /api/v1/links + `Idempotency-Key`" },
+    { "from": "api", "to": "r", "label": "INCR `rl:create:{owner}:{minute}`" },
+    { "note": "normalize the URL\nsync abuse checks (section 7.4)\nrejected: 422, nothing written", "at": "api" },
+    { "from": "api", "to": "pg", "label": "BEGIN; INSERT create_requests ON CONFLICT" },
+    { "note": "0 rows: this is a retry\nreturn the stored code (422 if body differs)", "over": ["api", "pg"] },
+    { "from": "api", "to": "pg", "label": "INSERT links (block id or custom alias)" },
+    { "note": "alias taken: 0 rows, ROLLBACK, 409", "over": ["api", "pg"] },
+    { "from": "api", "to": "pg", "label": "COMMIT" },
+    { "from": "api", "to": "r", "label": "SET `l:{code}` (first click is a hit)" },
+    { "from": "api", "to": "c", "reply": true, "label": "201 { code, short_url }" },
+    { "from": "pg", "to": "k", "dashed": true, "label": "CDC insert on `links.cdc`" },
+    { "from": "k", "to": "sc", "dashed": true, "label": "scan the new destination" },
+    { "note": "regional invalidators also read this event\nand DEL any stale `l404:{code}`", "over": ["k", "sc"] }
+  ]
+}

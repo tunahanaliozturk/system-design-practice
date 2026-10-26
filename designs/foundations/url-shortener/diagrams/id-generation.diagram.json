@@ -1,0 +1,28 @@
+{
+  "type": "sequence",
+  "title": "URL shortener: id blocks and code encoding",
+  "subtitle": "One nextval per 10,000 links; the permutation turns a counter into a code nobody can count",
+  "spacing": 230,
+  "participants": [
+    { "id": "h", "kind": "service", "label": "Create handler" },
+    { "id": "b", "kind": "service", "tag": "IN MEMORY", "label": "Pod id block" },
+    { "id": "pg", "kind": "postgres", "label": "PG primary" },
+    { "id": "rd", "kind": "service", "label": "Redirect pod" }
+  ],
+  "steps": [
+    { "from": "h", "to": "b", "label": "next id" },
+    { "section": "alt: block used up (once per 10,000 links)" },
+    { "from": "b", "to": "pg", "label": "SELECT nextval('link_id_blocks')" },
+    { "from": "pg", "to": "b", "reply": true, "label": "n = 4217" },
+    { "note": "this pod now owns ids\n42,170,000 to 42,179,999", "at": "b" },
+    { "section": "every link" },
+    { "from": "b", "to": "h", "reply": true, "label": "id = 42,170,005" },
+    { "from": "h", "to": "h", "label": "x = feistel40(id, KEY), 4 rounds" },
+    { "from": "h", "to": "h", "label": "code = base62(x), padded to 7 chars" },
+    { "from": "h", "to": "pg", "label": "INSERT INTO links (code, ...)" },
+    { "from": "pg", "to": "h", "reply": true, "label": "1 row: a bijection cannot collide" },
+    { "section": "redirect side: is this code worth a primary lookup?" },
+    { "from": "rd", "to": "rd", "label": "id = feistel40_inverse(base62_decode(code))" },
+    { "note": "id above `ids:hwm`: never issued, 404\notherwise ask the primary before 404", "at": "rd" }
+  ]
+}

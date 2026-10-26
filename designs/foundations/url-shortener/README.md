@@ -212,48 +212,55 @@ consumer away.
 
 **Create a link**
 
-1. The CDN routes `POST /api/v1/links` to the home region. The API authenticates the caller and checks
-   `rl:create:{owner_id}:{minute}`.
-2. It normalizes the URL (scheme and host lower-cased, default port dropped, IDN to punycode) and runs the
-   synchronous checks from section 7.4. A rejected URL returns 422 before anything is written.
-3. `BEGIN; INSERT INTO create_requests ... ON CONFLICT DO NOTHING`. Zero rows means a retry: read the
-   stored code, compare `request_hash`, return the same 201 (or 422). A concurrent duplicate waits on
-   the primary key until the first transaction commits, so it sees the stored row too.
-4. Generated code: take the next id from the pod's local block (a new block costs one
-   `SELECT nextval('link_id_blocks')`), permute it, encode it, `INSERT INTO links`. Custom alias:
-   `INSERT ... ON CONFLICT (code) DO NOTHING`; zero rows means `ROLLBACK` and 409.
-5. `COMMIT`, then return 201. The API also writes `l:{code}` into the home region's Redis, so the
-   owner's first test click is a hit.
-6. Debezium publishes the insert to `links.cdc`. Every regional invalidator deletes a stale
-   `l404:{code}` if a scanner probed the alias before it existed, and the abuse scanner queues a scan.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/create-flow-dark.png">
+  <img alt="Sequence: the client posts a link with an Idempotency-Key; the API checks the rate limit in Redis, runs the URL checks, inserts the idempotency row and the link in one PostgreSQL transaction, commits, warms Redis and returns 201. CDC then carries the insert through Kafka to the abuse scanner and the regional cache invalidators." src="diagrams/create-flow-light.png">
+</picture>
+
+1. The CDN routes `POST /api/v1/links` to the home region API.
+2. Rate limit per owner in Redis, then URL normalization and the synchronous checks from section 7.4.
+3. Insert the idempotency row. Zero rows means a retry: return the stored code. A concurrent duplicate
+   waits on the primary key and then sees the stored row.
+4. Insert the link: a generated code from the pod's id block (section 7.1) or the custom alias. A taken
+   alias rolls back with 409.
+5. Commit. Both rows exist or neither does.
+6. Warm `l:{code}` in the home region's Redis, then return 201.
+7. Debezium publishes the insert to `links.cdc`.
+8. The abuse scanner queues a scan; the invalidators clear any stale `l404:{code}`.
 
 **Redirect**
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/redirect-flow-dark.png">
-  <img alt="Sequence: the browser asks the CDN, the CDN asks the redirect service, which checks its in-process cache, then Redis, then the read replica, fills Redis, returns a 302 and sends the click event to Kafka afterwards. If the replica has no row, it checks the primary only when the code decodes to an allocated id, then negative-caches the 404." src="diagrams/redirect-flow-light.png">
+  <img alt="Sequence: the CDN edge forwards the request to the redirect service, which checks its in-process cache, then Redis, then the read replica, fills Redis, returns a 302 and sends the click event to Kafka afterwards. If the replica has no row, it checks the primary only when the code decodes to an allocated id, then negative-caches the 404." src="diagrams/redirect-flow-light.png">
 </picture>
 
-1. The browser resolves `s.example` to the nearest CDN edge and sends `GET /aB3xK9p`.
-2. The edge forwards to the nearest region over a pooled keep-alive connection, adding the country header.
-3. The pod checks its in-process LRU. A hit (about 60% of traffic, all of it hot links) answers in
-   microseconds.
-4. On a miss it reads `l:aB3xK9p` from Redis (about 38% of traffic, ~0.5 ms).
-5. On a Redis miss it queries the replica by primary key and fills Redis with a TTL of 24 hours or the
-   time left until `expires_at`, whichever is shorter. Concurrent misses for one code share one query.
-6. It checks `status` and `expires_at` and returns 302, 301, 410 or the warning page.
-7. After the response is flushed it appends the click event to the producer buffer. The producer sends
-   batches every 20 ms; the request never waits for Kafka.
-8. If the replica has no row, the pod decides whether the primary is worth asking (section 7.2), asks it
-   if so, and otherwise writes `l404:{code}` and returns 404.
+1. The edge nearest the user forwards `GET /aB3xK9p` to the nearest region with a country header. The pod
+   checks its in-process LRU first; about 60% of redirects end there.
+2. On a miss, Redis (about 38% of traffic, ~0.5 ms).
+3. On a Redis miss, the replica by primary key. Concurrent misses for one code share one query.
+4. Fill Redis with a TTL of 24 hours or the time left until `expires_at`, whichever is shorter, then
+   answer 302, 301, 410 or the warning page.
+5. After the response is flushed, the click event goes to the producer buffer. The request never waits
+   for Kafka.
+6. If the replica has no row and the code could exist (section 7.2), ask the primary.
+7. Still nothing: write `l404:{code}` and return 404.
 
 **Edit or takedown**
 
-1. The API (or the scanner) runs `UPDATE links SET ..., version = version + 1 WHERE code = $1 AND version = $2`.
-2. Debezium publishes the change to `links.cdc`, keyed by `code`.
-3. Each region's invalidator deletes `l:{code}` and, for a 301 link, purges the CDN URL.
-4. Pods still holding the old entry in memory drop it within 10 seconds. End-to-end staleness is about
-   CDC lag (1 to 2 s) plus the local TTL, so roughly 12 seconds at p99.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/edit-flow-dark.png">
+  <img alt="Sequence: the owner sends a PATCH with If-Match; the API runs a versioned UPDATE on the primary and returns 200. CDC carries the change through Kafka to the invalidator in each region, which deletes the Redis key. The abuse scanner uses the same UPDATE with status blocked." src="diagrams/edit-flow-light.png">
+</picture>
+
+1. The owner sends `PATCH` with `If-Match` on the current version.
+2. One versioned `UPDATE`. Zero rows means someone else edited first: 412.
+3. Debezium publishes the change to `links.cdc`, keyed by `code`.
+4. Each region's invalidator receives it.
+5. The invalidator deletes `l:{code}` (and purges the CDN URL for a 301 link). Pods drop their memory copy
+   within 10 seconds, so the change is live everywhere in about 12 seconds at p99.
+
+A takedown by the abuse scanner is the same `UPDATE` with `status = 'blocked'`; steps 3 to 5 do not change.
 
 ## 7. Deep dives
 
@@ -269,8 +276,22 @@ every link by counting.
 | Counter blocks | each pod takes 10,000 ids from a sequence, encodes them | Sequential codes leak volume and let anyone enumerate links, unless scrambled |
 | Snowflake-style 64-bit | time + machine + sequence | 11 base62 characters, too long for a short link |
 
-**Choice: counter blocks plus a keyed permutation.** The pod takes block `n` with one `nextval`, hands out
-ids `n * 10000` to `n * 10000 + 9999` from memory, and turns each id into a code like this:
+**Choice: counter blocks plus a keyed permutation.**
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/id-generation-dark.png">
+  <img alt="Sequence: the create handler asks the pod's in-memory id block for the next id; when the block is used up, the block takes a new range with one nextval on PostgreSQL. The handler permutes the id with a 40-bit Feistel network, encodes it as 7 base62 characters and inserts the link. On the redirect side a pod decodes a code back to an id and compares it with the high-water mark." src="diagrams/id-generation-light.png">
+</picture>
+
+1. The create handler asks the pod's in-memory block for the next id.
+2. Once per 10,000 links the block is empty and takes a new range with one `nextval`.
+3. The id goes through a 4-round, 40-bit Feistel permutation keyed with `KEY`.
+4. The result is written as base62 and left-padded to 7 characters.
+5. The insert cannot hit a conflict, because a permutation never maps two ids to one code.
+6. On the redirect side, any 7-character code decodes back to an id, which section 7.2 uses to skip the
+   primary for codes that were never issued.
+
+The encode path in code:
 
 ```python
 def code_for(id_: int) -> str:
@@ -437,15 +458,26 @@ add-on.
   `blocked_domains` (held in memory, refreshed every minute); our own domain and other shorteners rejected,
   because redirect chains hide the destination; a Safe Browsing-style hash-prefix list held in memory.
   New and guest accounts get tighter rate limits.
-- **After creation, asynchronously:** the scanner consumes `links.cdc`, fetches the destination from a
-  sandbox following up to 5 redirects, checks the final URL and page signals against reputation services,
-  and writes `status = 'blocked'` with `WHERE code = $1 AND version = $2`. Scans are idempotent on
-  `(code, version)`; an edit bumps the version and triggers a new scan.
+- **After creation, asynchronously:** the scan below. Scans are idempotent on `(code, version)`; an edit
+  bumps the version and triggers a new scan.
 - **Later:** destinations change after the scan (bait and switch), so active links are rescanned every
   30 days, and any link whose clicks jump past 1,000 a minute gets an immediate rescan. User reports go to
   a review queue.
 - **Serving a blocked link:** the redirect returns a warning page with no `Location` header. The row stays,
   so the code cannot be recycled for a new victim.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/abuse-scan-dark.png">
+  <img alt="Sequence: the abuse scanner reads a new or edited link from links.cdc, has a sandbox fetch the destination following redirects, checks the final URL with reputation services, and on a bad verdict runs a versioned UPDATE setting status blocked on the primary. CDC then carries the change back through Kafka to the cache invalidators." src="diagrams/abuse-scan-light.png">
+</picture>
+
+1. The scanner reads an insert or edit from `links.cdc`, with `code`, `version` and `long_url`.
+2. A sandboxed fetcher loads the destination, following up to 5 redirects.
+3. The final URL and domain go to reputation services.
+4. A bad verdict becomes `UPDATE links SET status = 'blocked' WHERE code = $1 AND version = $2`. Zero rows
+   means the link was edited meanwhile, and that newer version already has its own scan queued.
+5. The update flows out through CDC like any edit, and every region drops the link within about
+   15 seconds.
 
 ## 8. Failure cases
 

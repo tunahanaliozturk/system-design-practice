@@ -19,7 +19,7 @@
   "edges": [
     { "from": "client", "to": "cdn", "label": "HTTPS" },
     { "from": "cdn", "to": "redirect", "route": "hvh", "label": "GET /{code}", "labelSeg": 1 },
-    { "from": "cdn", "to": "api", "route": "hvh", "label": "/api/*", "labelSeg": 1 },
+    { "from": "cdn", "to": "api", "route": "hvh", "label": "/api/*", "labelSeg": 1, "labelPos": 0.25 },
     { "from": "redirect", "to": "redis", "route": "hvh", "via": 857, "offset": -26, "label": "GET" },
     { "from": "redirect", "to": "replica", "route": "hvh", "via": 857, "offset": 26, "label": "miss" },
     { "from": "redirect", "to": "kafka", "route": "hvh", "via": 1147, "offset2": -22, "dashed": true, "label": "click", "labelSeg": 1, "labelPos": 0.45 },
