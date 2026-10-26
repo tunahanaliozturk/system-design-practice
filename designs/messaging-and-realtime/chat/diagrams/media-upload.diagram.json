@@ -1,0 +1,29 @@
+{
+  "type": "sequence",
+  "title": "Chat: sending a photo",
+  "subtitle": "Bytes go straight to S3 and come back through the CDN; the chat pipeline only carries a media id",
+  "spacing": 220,
+  "participants": [
+    { "id": "a", "kind": "client", "label": "Sender device" },
+    { "id": "api", "kind": "service", "label": "Sync API" },
+    { "id": "s3", "kind": "storage", "label": "S3 media bucket" },
+    { "id": "chat", "kind": "service", "label": "Chat pipeline" },
+    { "id": "b", "kind": "client", "label": "Recipient device" },
+    { "id": "cdn", "kind": "cdn", "label": "CDN" }
+  ],
+  "steps": [
+    { "from": "a", "to": "api", "label": "POST /v1/media/uploads (mime, bytes)" },
+    { "from": "api", "to": "api", "label": "sign POST policy, size condition" },
+    { "from": "api", "to": "a", "reply": true, "label": "media_id, upload URL, 15 min" },
+    { "from": "a", "to": "s3", "label": "POST file (encrypted if E2E)" },
+    { "from": "s3", "to": "a", "reply": true, "label": "204" },
+    { "from": "a", "to": "chat", "label": "SEND kind=media, media_id, thumbnail" },
+    { "note": "same path as a text message:\ngateway, Kafka, store, fan-out", "at": "chat" },
+    { "from": "chat", "to": "b", "label": "MSG media_id + 2 KB blurred thumbnail" },
+    { "from": "b", "to": "api", "label": "GET /v1/media/{id}" },
+    { "from": "api", "to": "b", "reply": true, "label": "302 signed CDN URL, 5 min" },
+    { "from": "b", "to": "cdn", "label": "GET signed URL" },
+    { "from": "cdn", "to": "s3", "label": "origin fetch on edge miss" },
+    { "from": "cdn", "to": "b", "reply": true, "label": "file bytes" }
+  ]
+}

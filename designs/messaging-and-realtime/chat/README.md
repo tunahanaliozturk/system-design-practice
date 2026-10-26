@@ -300,24 +300,30 @@ key and partition count, so the same Message service instance owns a conversatio
 
 ### 6.1 Send to an online and an offline recipient
 
+Two diagrams: the send path up to the store, then delivery.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/send-message-dark.png">
-  <img alt="Sequence: sender sends to gateway A, which produces to Kafka and acks with the offset as seq. The Message service dedupes and writes to ScyllaDB, then publishes to chat.persisted. Fan-out looks up members and sessions in Redis. Online: delivers through gateway B, the device acks delivery, and a receipt flows back. Offline: a push request wakes the app, which syncs after its cursor." src="diagrams/send-message-light.png">
+  <img alt="Sequence: the sender sends to gateway A, which checks the rate limit, produces to Kafka keyed by conversation and acks with the offset as seq. The Message service polls the partition, dedupes on client_msgs, writes to ScyllaDB at quorum, produces to chat.persisted and commits its offset. Fan-out consumes the event." src="diagrams/send-message-light.png">
 </picture>
 
-1. Device A sends `send` with a fresh `client_msg_id`. Gateway A checks the rate limit and that A is in
-   `members:{conv}` (a fast pre-check; the Message service makes the binding check).
-2. Gateway A produces to `chat.inbound` with key = conversation id, `acks=all`. Kafka returns offset 48211.
-3. Gateway A replies `ack seq 48211`. One tick: the message is now on two or more brokers.
-4. The Message service instance that owns the partition reads the record. It checks `client_msgs`; this is
-   a new id.
-5. It writes the `messages` row, the `client_msgs` row, `conversation_heads`, and one `user_conversations`
-   row per member (skipped for groups over 100), all at `LOCAL_QUORUM`, then produces to `chat.persisted`.
-6. A fan-out worker reads the event, gets the member list and each member's `sess:{uid}` in one pipeline.
-7. Online recipient: one gRPC batch per gateway node. Gateway B writes the `msg` frame with `prev_seq`.
-   Device B stores it, acks `delivered up_to 48211`, and the receipt reaches A as the second tick.
-8. Offline recipient (no session): fan-out produces to `push.requests`. A push worker collapses per
-   conversation and calls APNs or FCM. The app wakes, connects and runs the catch-up in 6.2.
+- **1-2.** Device A sends with a fresh `client_msg_id`; gateway A checks the rate limit and membership cache.
+- **3.** Gateway A produces to `chat.inbound`, key = conversation id, `acks=all`, and acks the device with the
+  offset as seq. One tick: the message is on two or more brokers.
+- **4-5.** The partition's owner reads the record and dedupes on `client_msgs`.
+- **6.** Quorum writes, in seq order for that conversation.
+- **7-9.** It publishes to `chat.persisted`, commits its input offset, and fan-out picks the event up.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/deliver-message-dark.png">
+  <img alt="Sequence: fan-out reads the member list and session hashes from Redis. If the recipient is online it sends a gRPC batch to gateway B, which writes the frame; the device acks delivery and the gateway produces a receipt. If offline, fan-out produces a push request, a push worker collapses and calls APNs or FCM, and the woken app connects and syncs after its cursor." src="diagrams/deliver-message-light.png">
+</picture>
+
+- **1-2.** Fan-out gets the members and their `sess:{uid}` hashes in one pipeline.
+- **3-4.** Online: one gRPC batch per gateway node; gateway B writes the frame with `prev_seq`.
+- **5-6.** The device acks a watermark; the receipt becomes the sender's second tick.
+- **7-9.** Offline (no session): a push request, collapsed per conversation, sent to APNs or FCM.
+- **10.** The app wakes and runs the catch-up in 6.2.
 
 The sender's own other devices are members too, so they receive the message the same way.
 
@@ -325,25 +331,30 @@ The sender's own other devices are members too, so they receive the message the 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/reconnect-sync-dark.png">
-  <img alt="Sequence: a gateway node dies; the device waits a jittered backoff, reconnects through the load balancer to another node, which overwrites its entry in the Redis session hash. The device fetches its conversation index from the Sync API, compares it with local cursors, pulls messages after its cursor for each conversation that is behind, and acks delivery. A stale session entry for a device that has not reconnected is removed by fan-out with a compare-and-delete." src="diagrams/reconnect-sync-light.png">
+  <img alt="Sequence: a gateway node dies; the device waits a jittered backoff, reconnects to another node, which overwrites its entry in the Redis session hash. The device fetches its conversation index from the Sync API, compares it with local cursors, pulls messages after its cursor for each conversation that is behind, and acks delivery. A stale session entry for a device that has not reconnected is removed by fan-out with a compare-and-delete." src="diagrams/reconnect-sync-light.png">
 </picture>
 
-1. The socket closes (or two pongs are missed). The device waits `random(0, min(60 s, 1 s x 2^attempt))`.
-2. It reconnects; the new gateway overwrites `sess:{uid}[device] = node47:conn9`.
-3. `GET /v1/sync` returns the user's `user_conversations` partition: a few hundred `(conv, last_seq)` rows,
-   one partition read, ~10 KB. For `large` groups the API reads `conversation_heads` instead.
-4. The device compares each `last_seq` with its local cursor and, for each conversation that is behind,
-   pages `messages?after_seq=<cursor>` until `has_more` is false.
-5. It sends `delivered up_to` per conversation, which produces the sender-side receipts.
+- **1.** Socket closed or two pongs missed: wait a jittered backoff (7.5).
+- **2-3.** Reconnect through the load balancer; the new node overwrites the device's `sess:{uid}` field.
+- **4-5.** `GET /v1/sync` reads one `user_conversations` partition: a few hundred `(conv, last_seq)` rows,
+  ~10 KB. For `large` groups the API reads `conversation_heads` instead.
+- **6-7.** For each conversation behind the local cursor, page `messages?after_seq=<cursor>` until
+  `has_more` is false.
+- **8.** Ack `delivered up_to` per conversation, which produces the sender-side receipts.
 
 ### 6.3 Media
 
-1. `POST /v1/media/uploads` returns a pre-signed S3 POST valid for 15 minutes, with a size condition.
-2. The client uploads the (client-encrypted, if E2E) file straight to S3. The API is not in the byte path.
-3. The client sends a normal `send` with `kind = media`, `media_id`, and a ~2 KB blurred thumbnail inline,
-   so the chat renders before the download.
-4. Recipients call `GET /v1/media/{id}`, get a 302 to a short-lived signed CDN URL, and the CDN pulls from
-   S3 once per edge. S3 lifecycle moves objects older than 30 days to an infrequent-access tier.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/media-upload-dark.png">
+  <img alt="Sequence: the sender asks the Sync API for an upload; the API signs an S3 POST policy with a size condition and returns a media id and URL. The sender uploads straight to S3, then sends a normal chat message with the media id and a thumbnail. The recipient gets the message, asks the API for the media, gets a 302 to a signed CDN URL, and downloads from the CDN, which fetches from S3 on an edge miss." src="diagrams/media-upload-light.png">
+</picture>
+
+- **1-2.** The API signs an S3 POST policy (15 minutes, `content-length-range`) without touching S3.
+- **3.** The client uploads straight to S3 (encrypted first, if E2E). The API is never in the byte path.
+- **4-5.** A normal send with `kind = media`, `media_id` and a ~2 KB blurred thumbnail, so the chat renders
+  before the download.
+- **6-8.** The recipient gets a 302 to a 5-minute signed CDN URL; the CDN pulls from S3 once per edge.
+  S3 lifecycle moves objects older than 30 days to an infrequent-access tier.
 
 ## 7. Deep dives
 
@@ -415,13 +426,18 @@ push badge shows unread conversations. The partition count is frozen. Two Kafka 
 The unit of delivery is the device, the unit of receipts is the user, and the unit of storage is the
 conversation.
 
-- **Online devices** get a frame from fan-out. Each `sess:{uid}` field is one device, so a user on phone
-  and laptop gets two frames, possibly through two gateway nodes.
-- **Offline devices** get nothing pushed through the socket path and nothing queued for them. One push per
-  user (not per device) goes to APNs/FCM, collapsed per conversation and rate limited to one per 10 s.
-  The payload carries the conversation id and sender name, never the body.
-- **Every device catches up the same way**: sync index, then ranges after its own cursor (6.2). There is
-  no per-device inbox to fill, drain or lose.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/multi-device-dark.png">
+  <img alt="Sequence: fan-out reads the user's session hash, finds the phone on node 47 and the laptop on node 81, and delivers to both; the tablet has no field and gets nothing. No push is sent because the user has online devices. The phone acks delivery and the laptop acks read as watermarks. Later the tablet connects and syncs after its own cursor." src="diagrams/multi-device-light.png">
+</picture>
+
+- **1-4.** Each `sess:{uid}` field is one device. The phone and laptop get a frame each, through two nodes.
+  The tablet has no field, so nothing is pushed or queued for it.
+- **No push** while any device of the user is online: they are reading there. When `sess:{uid}` is empty,
+  one push per user goes to APNs/FCM, collapsed per conversation, at most one per 10 s, with the
+  conversation id and sender name, never the body.
+- **5-6.** Receipts arrive as watermarks from whichever device saw the message (below).
+- **7.** The tablet catches up like any device (6.2). There is no per-device inbox to fill, drain or lose.
 
 A per-device offline queue (store-and-forward, delete on ack) multiplies writes by the device count and
 makes a new device a history copy job. Pulling after a cursor makes both the same code as "offline".
@@ -442,17 +458,22 @@ day, around 35M/s, for a dot most people never look at.
 
 What we do instead:
 
-1. **Online is derived, not stored.** A user is online if `sess:{uid}` has a field. No extra writes.
-2. **Subscribe only to what is on screen.** When a chat opens, the client sends `presence_sub` for the peer
-   (or up to 20 members of a small group). The gateway reads the current state once and does `SSUBSCRIBE
-   pres:{uid}` on Redis sharded pub/sub. It unsubscribes when the chat closes.
-3. **Publish only real changes, debounced.** A gateway publishes `online` when a user's first device
-   connects and `offline` 10 s after the last one disconnects, so app switching does not flap. It writes
-   `lastseen:{uid}` at the same moment.
-4. **Typing** uses the same channels with a 5 s client-side expiry, never stored. Disabled in groups over
-   50 members.
-5. **Privacy** (`last_seen_privacy`) is checked at subscribe time, so a hidden user never has a channel
-   anyone can read.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/presence-dark.png">
+  <img alt="Sequence: the viewer opens a chat and subscribes to the contact's presence; gateway A checks privacy, reads the session hash and last seen from Redis, subscribes to the contact's sharded pub/sub channel and returns offline with last seen. When the contact connects, gateway B writes the session and publishes online, which reaches gateway A and the viewer. Typing travels the same way without being stored. When the contact's last socket closes, gateway B waits 10 seconds, writes last seen and publishes offline. When the viewer closes the chat, gateway A unsubscribes." src="diagrams/presence-light.png">
+</picture>
+
+- **Online is derived, not stored.** A user is online if `sess:{uid}` has a field. No extra writes.
+- **Subscribe only to what is on screen (1-5, 18).** When a chat opens, the client sends `presence_sub`
+  for the peer (or up to 20 members of a small group). The gateway reads the current state once and does
+  `SSUBSCRIBE pres:{uid}` on Redis sharded pub/sub. It unsubscribes when the chat closes.
+- **Publish only real changes, debounced (6-9, 14-17).** A gateway publishes `online` when a user's first
+  device connects and `offline` 10 s after the last one disconnects, so app switching does not flap. It
+  writes `lastseen:{uid}` at the same moment.
+- **Typing (10-13)** uses the same channels with a 5 s client-side expiry, never stored. Disabled in
+  groups over 50 members.
+- **Privacy (2)**: `last_seen_privacy` is checked at subscribe time, so a hidden user never has a channel
+  anyone can read.
 
 At ~20% of online users with a chat open, that is ~30M subscriptions and a change rate in the tens of
 thousands per second. A gateway node crash leaves its users "online" for up to the 300 s registry TTL;
@@ -462,6 +483,16 @@ for a presence dot that is acceptable, and the stale fan-out case is handled in 
 
 A message to a 500-member group is one stored row, 500 member lookups, ~280 online devices and up to 500
 index writes. Ingest is cheap; fan-out is where the cost is.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/group-fanout-dark.png">
+  <img alt="Sequence comparing a 40-member and a 480-member group. Small group: the Message service writes the message row, the heads row and 40 per-member index rows, produces to chat.persisted, and fan-out uses its local member cache, one Redis pipeline and about 25 gRPC calls. Large group: only the message and heads rows are written; fan-out does one 480-entry Redis pipeline and about 240 coalesced calls, with typing, pushed read receipts and loud pushes turned off. A member_added system message gets a seq and switches the member list from that seq on." src="diagrams/group-fanout-light.png">
+</picture>
+
+- **1-7.** Small group: per-member index rows, then local member list, one Redis pipeline, one call per node.
+- **8-12.** Large group: no per-member rows; the same fan-out shape with more nodes and coalescing.
+- **13-15.** A membership change is a message with its own seq, so every worker switches lists at the same
+  point.
 
 - **One stored copy.** Messages are stored per conversation, never per recipient. Fan-out moves pointers
   and frames, not message copies.

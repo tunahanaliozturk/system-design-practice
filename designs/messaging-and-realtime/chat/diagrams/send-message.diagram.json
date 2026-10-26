@@ -1,41 +1,28 @@
 {
   "type": "sequence",
-  "title": "Chat: sending a message to an online and an offline recipient",
-  "subtitle": "The sender gets its tick once Kafka has the record; the recipient sees it only after the store has it",
-  "spacing": 175,
+  "title": "Chat: the send path",
+  "subtitle": "The sender gets its tick once Kafka has the record; recipients see it only after the store has it",
+  "spacing": 220,
   "participants": [
     { "id": "a", "kind": "client", "label": "Sender device" },
     { "id": "gwa", "kind": "service", "tag": "STATEFUL", "label": "Gateway A" },
     { "id": "k", "kind": "queue", "label": "Kafka" },
     { "id": "m", "kind": "service", "label": "Message service" },
     { "id": "db", "kind": "nosql", "tag": "SCYLLADB", "label": "Message store" },
-    { "id": "f", "kind": "worker", "label": "Fan-out" },
-    { "id": "r", "kind": "redis", "label": "Redis" },
-    { "id": "p", "kind": "worker", "label": "Push workers" },
-    { "id": "gwb", "kind": "service", "tag": "STATEFUL", "label": "Gateway B" },
-    { "id": "b", "kind": "client", "label": "Recipient device" }
+    { "id": "f", "kind": "worker", "label": "Fan-out" }
   ],
   "steps": [
     { "from": "a", "to": "gwa", "label": "SEND conv, `client_msg_id`, body" },
-    { "from": "gwa", "to": "k", "label": "produce `chat.inbound`, key = conv, acks=all" },
-    { "from": "k", "to": "gwa", "reply": true, "label": "offset 48211" },
+    { "from": "gwa", "to": "gwa", "label": "rate limit, member pre-check" },
+    { "from": "gwa", "to": "k", "label": "produce `chat.inbound`, key = conv" },
+    { "from": "k", "to": "gwa", "reply": true, "label": "acks=all: offset 48211" },
     { "from": "gwa", "to": "a", "reply": true, "label": "ACK seq 48211 (one tick)" },
     { "from": "k", "to": "m", "dashed": true, "label": "poll partition 1873" },
     { "from": "m", "to": "db", "label": "SELECT `client_msgs` (dedupe)" },
-    { "note": "QUORUM writes, in seq order per conversation:\n`messages` row, `client_msgs` row,\n`user_conversations` last_seq per member", "over": ["m", "db"] },
+    { "from": "m", "to": "db", "label": "QUORUM writes, in seq order" },
+    { "note": "`messages` row, `client_msgs` row,\n`conversation_heads`,\n`user_conversations` per member", "at": "db" },
     { "from": "m", "to": "k", "label": "produce `chat.persisted`" },
-    { "from": "k", "to": "f", "dashed": true, "label": "consume" },
-    { "from": "f", "to": "r", "label": "SMEMBERS `members:{conv}`, HGETALL `sess:{uid}`" },
-    { "section": "alt: recipient online (session found)" },
-    { "from": "f", "to": "gwb", "label": "Deliver batch (gRPC)" },
-    { "from": "gwb", "to": "b", "label": "MSG seq 48211, prev_seq 47990" },
-    { "from": "b", "to": "gwb", "label": "DELIVERED up_to 48211" },
-    { "from": "gwb", "to": "k", "label": "produce `chat.receipts`" },
-    { "note": "receipt consumer keeps max(delivered_seq), fan-out routes\nRECEIPT to the sender's devices: two ticks", "over": ["k", "f"] },
-    { "section": "alt: recipient offline (no session in Redis)" },
-    { "from": "f", "to": "p", "dashed": true, "label": "`push.requests`, key = user" },
-    { "from": "p", "to": "p", "label": "collapse per conv, APNs or FCM" },
-    { "from": "b", "to": "gwb", "label": "app wakes, connects, syncs after cursor" },
-    { "from": "gwb", "to": "b", "reply": true, "label": "messages after seq 47990" }
+    { "from": "m", "to": "k", "label": "commit `chat.inbound` offset" },
+    { "from": "k", "to": "f", "dashed": true, "label": "consume: deliver (next diagram)" }
   ]
 }

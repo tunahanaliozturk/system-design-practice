@@ -1,0 +1,30 @@
+{
+  "type": "sequence",
+  "title": "Chat: one user, three devices",
+  "subtitle": "Deliver per device, receipt per user: online devices get frames, the offline tablet pulls later",
+  "spacing": 220,
+  "participants": [
+    { "id": "f", "kind": "worker", "label": "Fan-out" },
+    { "id": "r", "kind": "redis", "label": "Redis" },
+    { "id": "gw", "kind": "service", "tag": "STATEFUL", "label": "Gateways" },
+    { "id": "ph", "kind": "client", "label": "Phone" },
+    { "id": "lt", "kind": "client", "label": "Laptop" },
+    { "id": "tb", "kind": "client", "label": "Tablet (offline)" }
+  ],
+  "steps": [
+    { "from": "f", "to": "r", "label": "HGETALL `sess:{u_8}`" },
+    { "from": "r", "to": "f", "reply": true, "label": "phone: node47, laptop: node81" },
+    { "note": "tablet has no field:\nit is offline", "at": "f" },
+    { "from": "f", "to": "gw", "label": "Deliver to node47 and node81 (gRPC)" },
+    { "from": "gw", "to": "ph", "label": "MSG seq 48211" },
+    { "from": "gw", "to": "lt", "label": "MSG seq 48211" },
+    { "note": "no push: the user has online devices;\npushes go out only when `sess:{u_8}` is empty", "over": ["f", "gw"] },
+    { "section": "receipts are watermarks per user" },
+    { "from": "ph", "to": "gw", "label": "DELIVERED up_to 48211" },
+    { "from": "lt", "to": "gw", "label": "READ up_to 48211" },
+    { "note": "`chat.receipts` keyed by conv: one consumer\napplies max(), a stale watermark from\nan old device never moves read state back", "over": ["f", "gw"] },
+    { "section": "later: the tablet comes online" },
+    { "from": "tb", "to": "gw", "label": "connect, sync, fetch after its cursor" },
+    { "note": "same catch-up as any device;\nno per-device queue was filled for it", "over": ["lt", "tb"] }
+  ]
+}

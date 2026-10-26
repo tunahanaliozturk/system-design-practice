@@ -1,0 +1,30 @@
+{
+  "type": "sequence",
+  "title": "Chat: delivering to an online and an offline recipient",
+  "subtitle": "A session in Redis means a socket frame; no session means a push and a pull later",
+  "spacing": 220,
+  "participants": [
+    { "id": "f", "kind": "worker", "label": "Fan-out" },
+    { "id": "r", "kind": "redis", "label": "Redis" },
+    { "id": "gwb", "kind": "service", "tag": "STATEFUL", "label": "Gateway B" },
+    { "id": "b", "kind": "client", "label": "Recipient device" },
+    { "id": "k", "kind": "queue", "label": "Kafka" },
+    { "id": "p", "kind": "worker", "label": "Push workers" }
+  ],
+  "steps": [
+    { "from": "f", "to": "r", "label": "SMEMBERS `members:{conv}`" },
+    { "from": "f", "to": "r", "label": "HGETALL `sess:{uid}` (pipelined)" },
+    { "section": "alt: recipient online (session found)" },
+    { "from": "f", "to": "gwb", "label": "Deliver batch (gRPC)" },
+    { "from": "gwb", "to": "b", "label": "MSG seq 48211, prev_seq 47990" },
+    { "from": "b", "to": "gwb", "label": "DELIVERED up_to 48211" },
+    { "from": "gwb", "to": "k", "label": "produce `chat.receipts`" },
+    { "note": "Message service keeps max(delivered_seq),\nsends RECEIPT to the sender: two ticks", "over": ["k", "p"] },
+    { "section": "alt: recipient offline (no session in Redis)" },
+    { "from": "f", "to": "k", "dashed": true, "label": "produce `push.requests`, key = user" },
+    { "from": "k", "to": "p", "dashed": true, "label": "consume" },
+    { "from": "p", "to": "p", "label": "collapse per conv, call APNs or FCM" },
+    { "from": "b", "to": "gwb", "label": "app wakes, connects (see reconnect)" },
+    { "from": "gwb", "to": "b", "reply": true, "label": "sync: messages after seq 47990" }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "type": "sequence",
+  "title": "Chat: presence for the chat on screen",
+  "subtitle": "Subscribe when a chat opens, publish only real changes, unsubscribe when it closes",
+  "spacing": 220,
+  "participants": [
+    { "id": "a", "kind": "client", "label": "Viewer device" },
+    { "id": "gwa", "kind": "service", "tag": "STATEFUL", "label": "Gateway A" },
+    { "id": "r", "kind": "redis", "label": "Redis" },
+    { "id": "gwb", "kind": "service", "tag": "STATEFUL", "label": "Gateway B" },
+    { "id": "b", "kind": "client", "label": "Contact device" }
+  ],
+  "steps": [
+    { "from": "a", "to": "gwa", "label": "open chat: presence_sub [u_8]" },
+    { "from": "gwa", "to": "gwa", "label": "check last_seen_privacy" },
+    { "from": "gwa", "to": "r", "label": "EXISTS `sess:{u_8}`, GET `lastseen:{u_8}`" },
+    { "from": "gwa", "to": "r", "label": "SSUBSCRIBE `pres:{u_8}`" },
+    { "from": "gwa", "to": "a", "label": "presence offline, last_seen 09:12" },
+    { "section": "contact comes online" },
+    { "from": "b", "to": "gwb", "label": "connect (first device of u_8)" },
+    { "from": "gwb", "to": "r", "label": "HSET `sess:{u_8}`, SPUBLISH online" },
+    { "from": "r", "to": "gwa", "dashed": true, "label": "online" },
+    { "from": "gwa", "to": "a", "label": "presence online" },
+    { "from": "b", "to": "gwb", "label": "typing" },
+    { "from": "gwb", "to": "r", "label": "SPUBLISH typing (not stored)" },
+    { "from": "r", "to": "gwa", "dashed": true, "label": "typing" },
+    { "from": "gwa", "to": "a", "label": "typing, expires after 5 s" },
+    { "section": "contact goes offline" },
+    { "from": "gwb", "to": "gwb", "label": "last socket closed, wait 10 s" },
+    { "from": "gwb", "to": "r", "label": "SET `lastseen:{u_8}`, SPUBLISH offline" },
+    { "from": "r", "to": "gwa", "dashed": true, "label": "offline" },
+    { "from": "gwa", "to": "a", "label": "presence offline, last_seen now" },
+    { "section": "viewer closes the chat" },
+    { "from": "gwa", "to": "r", "label": "SUNSUBSCRIBE `pres:{u_8}`" }
+  ]
+}

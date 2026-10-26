@@ -1,0 +1,36 @@
+{
+  "type": "sequence",
+  "title": "Chat: group fan-out, small and large groups",
+  "subtitle": "One stored copy either way; above 100 members the per-member index writes stop",
+  "spacing": 220,
+  "participants": [
+    { "id": "m", "kind": "service", "label": "Message service" },
+    { "id": "db", "kind": "nosql", "tag": "SCYLLADB", "label": "Message store" },
+    { "id": "k", "kind": "queue", "label": "Kafka" },
+    { "id": "f", "kind": "worker", "label": "Fan-out" },
+    { "id": "r", "kind": "redis", "label": "Redis" },
+    { "id": "gw", "kind": "service", "tag": "STATEFUL", "label": "Gateways" }
+  ],
+  "steps": [
+    { "section": "small group: 40 members" },
+    { "from": "m", "to": "db", "label": "`messages` row + `conversation_heads`" },
+    { "from": "m", "to": "db", "label": "40 `user_conversations` rows" },
+    { "from": "m", "to": "k", "label": "produce `chat.persisted`" },
+    { "from": "k", "to": "f", "dashed": true, "label": "consume" },
+    { "from": "f", "to": "f", "label": "member list from local cache" },
+    { "from": "f", "to": "r", "label": "40 HGETALL `sess:*`, one pipeline" },
+    { "from": "f", "to": "gw", "label": "~25 gRPC calls, one per node" },
+    { "section": "large group: 480 members" },
+    { "from": "m", "to": "db", "label": "`messages` row + `conversation_heads` only" },
+    { "note": "no per-member rows: members' sync\nreads `conversation_heads`", "at": "db" },
+    { "from": "m", "to": "k", "label": "produce `chat.persisted`" },
+    { "from": "k", "to": "f", "dashed": true, "label": "consume" },
+    { "from": "f", "to": "r", "label": "480 HGETALL `sess:*`, one pipeline" },
+    { "from": "f", "to": "gw", "label": "~240 calls, coalesced over 10 ms" },
+    { "note": "no typing, no pushed read receipts,\npushes collapsed and mutable", "at": "gw" },
+    { "section": "membership change" },
+    { "from": "m", "to": "k", "label": "member_added gets seq 50100" },
+    { "from": "k", "to": "f", "dashed": true, "label": "consume in order" },
+    { "from": "f", "to": "f", "label": "new member list from seq 50100" }
+  ]
+}
