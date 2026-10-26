@@ -103,7 +103,7 @@ const defs = (t) =>
 // ---------- architecture ----------
 
 function layoutArchitecture(spec) {
-  const g = { nodeW: 200, cellW: 290, rowH: 150, top: spec.subtitle ? 96 : 80, left: 32, ...(spec.grid ?? {}) };
+  const g = { nodeW: 200, cellW: 290, rowH: 150, top: (spec.subtitle ? 96 : 80) + (spec.groups?.length ? 22 : 0), left: 32, ...(spec.grid ?? {}) };
   const nodes = new Map();
   for (const n of spec.nodes) {
     const lines = n.lines ?? [];

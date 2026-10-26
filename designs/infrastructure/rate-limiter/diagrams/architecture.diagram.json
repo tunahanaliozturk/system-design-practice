@@ -1,0 +1,30 @@
+{
+  "type": "architecture",
+  "title": "Distributed rate limiter: high-level architecture",
+  "subtitle": "Gateways decide locally from leased tokens, Redis holds the buckets, PostgreSQL holds the rules, Kafka carries rules out and usage back",
+  "nodes": [
+    { "id": "client", "kind": "client", "label": "API consumers", "col": 0, "row": 1, "lines": ["API key, JWT or anonymous", "1M req/s peak"] },
+    { "id": "gw", "kind": "gateway", "label": "Gateway fleet", "col": 1, "row": 1, "h": 150, "lines": ["50 nodes, 20k req/s each", "limiter module in-process", "rule cache, token leases", "deny cache, Redis breaker"] },
+    { "id": "up", "kind": "service", "label": "Upstream APIs", "col": 2, "row": 0, "lines": ["orders, search, ...", "only sees allowed calls"] },
+    { "id": "redis", "kind": "redis", "label": "Redis Cluster", "col": 2.6, "row": 1, "lines": ["16 primaries + replicas", "`rl:tb:{k:42}:r17` buckets", "Lua take(n)"] },
+    { "id": "admin", "kind": "client", "label": "Admin console", "col": 0, "row": 2.7, "lines": ["plans, overrides", "emergency blocks"] },
+    { "id": "rules", "kind": "service", "label": "Rules service", "col": 1, "row": 2.7, "lines": ["validates rules", "rule + outbox in one tx"] },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL", "col": 2, "row": 2.7, "lines": ["rate_limit_rules", "quota_usage, outbox", "source of truth"] },
+    { "id": "kafka", "kind": "queue", "label": "Kafka", "col": 3, "row": 2.7, "lines": ["ratelimit.rules", "ratelimit.blocks", "ratelimit.usage"] },
+    { "id": "agg", "kind": "worker", "label": "Quota aggregator", "col": 3, "row": 4.1, "lines": ["sums usage per key", "emits quota blocks"] },
+    { "id": "alloc", "kind": "worker", "label": "Budget allocator", "col": 4, "row": 4.1, "lines": ["global limits only", "regional shares / 10 s"] }
+  ],
+  "edges": [
+    { "from": "client", "to": "gw", "label": "HTTPS" },
+    { "from": "gw", "to": "up", "route": "hvh", "via": 567, "offset": -45, "label": "allowed", "labelSeg": 1 },
+    { "from": "gw", "to": "redis", "offset": 10, "both": true, "label": "EVALSHA" },
+    { "from": "admin", "to": "rules", "label": "PUT rule" },
+    { "from": "rules", "to": "pg", "label": "tx" },
+    { "from": "pg", "to": "kafka", "dashed": true, "label": "CDC" },
+    { "from": "kafka", "to": "gw", "route": "vhv", "via": 445, "offset": 30, "offset2": 40, "dashed": true, "label": "rules, blocks, shares", "labelSeg": 1, "labelPos": 0.6 },
+    { "from": "gw", "to": "kafka", "route": "vhv", "via": 470, "offset": -40, "offset2": -30, "dashed": true, "label": "usage deltas / 10 s", "labelSeg": 1, "labelPos": 0.75 },
+    { "from": "kafka", "to": "agg", "dashed": true, "both": true, "offset": -30, "label": "usage / blocks" },
+    { "from": "agg", "to": "pg", "route": "hvh", "via": 857, "offset2": 30, "label": "upsert", "labelSeg": 0 },
+    { "from": "kafka", "to": "alloc", "route": "hvh", "via": 1147, "dashed": true, "both": true, "label": "usage / shares", "labelSeg": 1 }
+  ]
+}

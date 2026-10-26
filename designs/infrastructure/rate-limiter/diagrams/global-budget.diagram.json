@@ -1,0 +1,29 @@
+{
+  "type": "architecture",
+  "title": "Rate limiter: one global limit across three regions",
+  "subtitle": "Each region enforces its own share locally; the allocator moves shares toward demand every 10 s, and the shares always sum to the global limit",
+  "nodes": [
+    { "id": "r_eu", "kind": "redis", "label": "Redis EU", "col": 0, "row": 0, "lines": ["bucket at EU share", "16,800/s"] },
+    { "id": "g_eu", "kind": "gateway", "label": "Gateways EU", "col": 1, "row": 0, "lines": ["60% of the key's traffic"] },
+    { "id": "r_us", "kind": "redis", "label": "Redis US", "col": 0, "row": 1.4, "lines": ["bucket at US share", "9,150/s"] },
+    { "id": "g_us", "kind": "gateway", "label": "Gateways US", "col": 1, "row": 1.4, "lines": ["30% of the key's traffic"] },
+    { "id": "r_ap", "kind": "redis", "label": "Redis AP", "col": 0, "row": 2.8, "lines": ["bucket at AP share", "4,050/s"] },
+    { "id": "g_ap", "kind": "gateway", "label": "Gateways AP", "col": 1, "row": 2.8, "lines": ["10% of the key's traffic"] },
+    { "id": "kafka", "kind": "queue", "label": "Kafka (home region)", "col": 2.4, "row": 1.4, "lines": ["ratelimit.usage", "ratelimit.shares", "mirrored to all regions"] },
+    { "id": "alloc", "kind": "worker", "label": "Budget allocator", "col": 3.6, "row": 1.4, "h": 130, "lines": ["global rule: 30,000/s", "share = floor + demand", "floor 5% per region", "sum of shares = limit"] }
+  ],
+  "edges": [
+    { "from": "g_eu", "to": "r_eu", "both": true, "label": "Lua" },
+    { "from": "g_us", "to": "r_us", "both": true, "label": "Lua" },
+    { "from": "g_ap", "to": "r_ap", "both": true, "label": "Lua" },
+    { "from": "g_eu", "to": "kafka", "route": "hvh", "via": 567, "offset2": -24, "dashed": true, "both": true, "label": "usage / shares", "labelSeg": 1, "labelPos": 0.65 },
+    { "from": "g_us", "to": "kafka", "dashed": true, "both": true, "label": "usage / shares", "labelPos": 0.6 },
+    { "from": "g_ap", "to": "kafka", "route": "hvh", "via": 567, "offset2": 24, "dashed": true, "both": true, "label": "usage / shares", "labelSeg": 1, "labelPos": 0.6 },
+    { "from": "kafka", "to": "alloc", "dashed": true, "both": true, "label": "every 10 s" }
+  ],
+  "groups": [
+    { "label": "REGION EU-WEST", "nodes": ["r_eu", "g_eu"] },
+    { "label": "REGION US-EAST", "nodes": ["r_us", "g_us"] },
+    { "label": "REGION AP-SOUTHEAST", "nodes": ["r_ap", "g_ap"] }
+  ]
+}
