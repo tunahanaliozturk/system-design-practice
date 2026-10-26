@@ -1,0 +1,27 @@
+{
+  "type": "sequence",
+  "title": "Ride-hailing: driver location update",
+  "subtitle": "Every 4 s per driver, 1.25M per second at peak; nothing on this path touches PostgreSQL",
+  "spacing": 215,
+  "participants": [
+    { "id": "drv", "kind": "client", "label": "Driver app" },
+    { "id": "gw", "kind": "gateway", "label": "Driver gateway" },
+    { "id": "rd", "kind": "redis", "label": "Redis" },
+    { "id": "k", "kind": "queue", "label": "Kafka" },
+    { "id": "g", "kind": "service", "label": "Geo index" },
+    { "id": "s3", "kind": "storage", "label": "S3 archive" }
+  ],
+  "steps": [
+    { "from": "drv", "to": "gw", "label": "loc { seq, ts, lat, lng, hdg, st } over WSS" },
+    { "from": "gw", "to": "gw", "label": "drop if seq not newer or speed > 250 km/h" },
+    { "from": "gw", "to": "gw", "label": "stamp server time, H3 res-9 cell, region" },
+    { "from": "gw", "to": "k", "label": "produce `locations.{region}`, key driver_id" },
+    { "section": "alt: driver has an active trip (cached on the connection)" },
+    { "from": "gw", "to": "rd", "label": "PUBLISH `trip:{trip_id}` point" },
+    { "from": "gw", "to": "rd", "label": "RPUSH `trip:path:{trip_id}` point" },
+    { "section": "consumers, each in its own group" },
+    { "from": "k", "to": "g", "dashed": true, "label": "batch of pings (every replica)" },
+    { "note": "drop if ts not newer than stored\nmove between cell sets if cell or status changed\nevict drivers silent for 30 s", "at": "g" },
+    { "from": "k", "to": "s3", "dashed": true, "label": "S3 sink: Parquet by date/city/hour" }
+  ]
+}

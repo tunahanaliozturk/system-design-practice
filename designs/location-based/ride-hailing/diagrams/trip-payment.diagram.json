@@ -1,0 +1,36 @@
+{
+  "type": "sequence",
+  "title": "Ride-hailing: trip and payment",
+  "subtitle": "Authorize when the trip is requested, capture when it completes; both calls are keyed by our trip id",
+  "spacing": 215,
+  "participants": [
+    { "id": "drv", "kind": "client", "label": "Driver app" },
+    { "id": "t", "kind": "service", "label": "Trip service" },
+    { "id": "rd", "kind": "redis", "label": "Redis" },
+    { "id": "pg", "kind": "postgres", "label": "PostgreSQL" },
+    { "id": "pay", "kind": "service", "label": "Payment service" },
+    { "id": "psp", "kind": "external", "label": "Payment provider" }
+  ],
+  "steps": [
+    { "section": "at request time, in parallel with dispatch" },
+    { "from": "pg", "to": "pay", "dashed": true, "label": "trip.requested (CDC via Kafka)" },
+    { "from": "pay", "to": "pg", "label": "INSERT payments AUTH_PENDING ON CONFLICT DO NOTHING" },
+    { "from": "pay", "to": "psp", "label": "authorize quote + 20%, key `auth-{trip_id}`" },
+    { "from": "psp", "to": "pay", "reply": true, "label": "authorized" },
+    { "from": "pay", "to": "pg", "label": "status = AUTHORIZED" },
+    { "section": "pickup and ride" },
+    { "from": "drv", "to": "t", "label": "POST arrived (or 150 m geofence)" },
+    { "from": "t", "to": "pg", "label": "DRIVER_ARRIVING WHERE status = MATCHED" },
+    { "from": "drv", "to": "t", "label": "POST start { pin }" },
+    { "from": "t", "to": "pg", "label": "IN_PROGRESS WHERE status = DRIVER_ARRIVING" },
+    { "section": "end of trip" },
+    { "from": "drv", "to": "t", "label": "POST complete" },
+    { "from": "t", "to": "rd", "label": "LRANGE `trip:path:{trip_id}`" },
+    { "note": "distance from the path, polyline to S3\nfinal fare = quote, unless destination changed\nor actual route ran 25% over the quoted one\nBEGIN; COMPLETED WHERE status = IN_PROGRESS\nINSERT outbox trip.completed; COMMIT", "over": ["t", "pg"] },
+    { "from": "t", "to": "drv", "reply": true, "label": "200 COMPLETED { fare_cents }" },
+    { "from": "pg", "to": "pay", "dashed": true, "label": "trip.completed" },
+    { "from": "pay", "to": "psp", "label": "capture final fare, key `capture-{trip_id}`" },
+    { "from": "psp", "to": "pay", "reply": true, "label": "captured  (timeout: retry, same key)" },
+    { "from": "pay", "to": "pg", "label": "CAPTURED + outbox payment.captured" }
+  ]
+}

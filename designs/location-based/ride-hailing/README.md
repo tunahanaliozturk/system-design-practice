@@ -279,64 +279,79 @@ Location topics have 6 h retention and run on their own cluster, so a location s
 
 ## 6. Request flows
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="diagrams/dispatch-flow-dark.png">
-  <img alt="Sequence: rider creates a trip, CDC delivers trip.requested to Dispatch, Dispatch queries the geo index, ranks by ETA, locks a driver in Redis, writes the offer columns, publishes the offer; the driver accepts and a conditional UPDATE moves the trip to MATCHED." src="diagrams/dispatch-flow-light.png">
-</picture>
+The diagrams carry the detail; the numbered steps under each one match the numbers in the diagram.
 
 **Driver location update** (every 4 s per driver)
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/location-update-dark.png">
+  <img alt="Sequence: the driver app sends a location ping to the driver gateway, which validates it, computes the H3 cell, produces it to Kafka, and for on-trip drivers publishes it to Redis and appends it to the trip path. Geo index replicas and the S3 sink consume the topic." src="diagrams/location-update-light.png">
+</picture>
+
 1. The app sends `loc` with `seq` and device time over the socket.
-2. The gateway drops it if `seq` is not greater than the last one on this connection, or if the implied speed
-   from the previous point is over 250 km/h (GPS jump). It stamps server time, computes the H3 res-9 cell.
-3. The gateway produces to `locations.{region}` with key driver_id, `acks=1`, 5 ms linger. Losing a ping is
-   fine; the next one is 4 s away.
-4. If the driver has an active trip (`drv:trip:{id}`, cached on the connection), it also publishes the point to
-   `trip:{trip_id}` and appends it to `trip:path:{trip_id}`.
-5. Geo index replicas apply the ping: update the driver record, move the driver between cell sets if the cell
-   changed, drop the driver from cell sets if the status is not AVAILABLE.
+2. The gateway drops out-of-order pings and GPS jumps (implied speed over 250 km/h).
+3. It stamps server time and computes the H3 res-9 cell and the region.
+4. It produces to `locations.{region}`, key driver_id, `acks=1`, 5 ms linger. A lost ping is fine; the next is 4 s away.
+5. On-trip drivers only: the point goes to `trip:{trip_id}` for the rider's live map.
+6. And to `trip:path:{trip_id}` for the final fare.
+7. Every geo index replica applies the batch (section 7.1).
+8. The S3 sink archives the topic as Parquet.
 
 **Fare estimate**
 
-1. Rider sends pickup, dropoff, vehicle type. Pricing gets the route (distance, duration) from Routing.
-2. Pricing reads `surge:{res7 cell of pickup}` (missing key means 1.0) and the regional rate card.
-3. Pricing asks the geo index for the nearest few available drivers to compute the pickup ETA shown in the app.
-4. It returns a quote token: HMAC over `{quote_id, rider_id, pickup, dropoff, vehicle_type, fare_cents, surge,
-   expires_at = now + 5 min, key_id}`. Nothing is stored; the quote event goes to `pricing.quotes`.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/fare-estimate-dark.png">
+  <img alt="Sequence: Pricing gets the route from Routing, the surge multiplier from Redis, nearby drivers from the geo index and their ETA from Routing, then signs a quote token, emits a quote event to Kafka and returns the token." src="diagrams/fare-estimate-light.png">
+</picture>
 
-**Request, match, accept** (the diagram above)
+1. Rider sends pickup, dropoff and vehicle type.
+2. Pricing gets distance and duration from Routing.
+3. It reads `surge:{res-7 cell}`; a missing key means 1.0.
+4. It asks the geo index for the nearest available drivers.
+5. Routing turns them into the pickup ETA shown in the app.
+6. Pricing signs the quote (HMAC, valid 5 minutes), emits it to `pricing.quotes` and returns the token. Nothing is stored.
 
-1. `POST /trips` with the quote token and an `Idempotency-Key`. The Trip service verifies the signature, the
-   expiry and that the token belongs to this rider.
-2. One transaction: `INSERT trips (REQUESTED)` with the quoted price copied onto the row, plus an outbox row.
-   The partial unique index rejects a second active trip for the rider. Returns 202.
-3. Debezium publishes `trip.requested` (key trip_id). Dispatch and the Payment service both consume it.
-4. Dispatch queries the geo index replica for the region: available drivers of the right vehicle type in
-   `kRing(pickup_cell, 2)`, widening to 4, then 7, until it has at least 8 candidates.
-5. Dispatch asks Routing for a one-to-many ETA matrix from the candidates to the pickup, ranks, keeps the top 5.
-6. For the best candidate: `SET drv:lock:{driver} {trip_id} NX EX 15`. If it fails, someone else is offering
-   to that driver; skip.
-7. `UPDATE trips SET offer_driver_id = $d, offer_expires_at = now() + interval '12 s' WHERE id = $t AND status = 'REQUESTED'`.
-   Zero rows means the rider cancelled; release the lock and stop.
-8. `PUBLISH driver:{id}` with the offer. The gateway node holding that socket forwards it.
-9. Driver accepts: the conditional UPDATE in the deep dive below moves the trip to MATCHED. Zero rows returns
-   409. The outbox emits `trip.matched`; the Notifier tells the rider; the Trip service sets `drv:trip:{id}`.
-10. Decline or 12 s timeout: compare-and-delete the lock, add the driver to `dispatch:{trip}:tried`, go to the
-    next candidate. After the list is exhausted, widen the ring. After 60 s with no match, the trip is
-    CANCELLED by SYSTEM with reason `NO_DRIVERS` and the rider is told.
+**Request, match, accept**
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/dispatch-flow-dark.png">
+  <img alt="Sequence: rider creates a trip, CDC delivers trip.requested to Dispatch, Dispatch searches the geo index, ranks by ETA, locks a driver in Redis, writes the offer columns, publishes the offer; the driver accepts and a conditional UPDATE moves the trip to MATCHED." src="diagrams/dispatch-flow-light.png">
+</picture>
+
+1. `POST /trips` with the quote token and an `Idempotency-Key`; one transaction inserts the trip and an outbox
+   row. Returns 202.
+2. Debezium publishes `trip.requested`; Dispatch (and the Payment service) consume it.
+3. Dispatch queries the geo index ring by ring until it has at least 8 candidates (section 7.1).
+4. A one-to-many ETA matrix from Routing ranks them; keep the top 5.
+5. `SET NX` the driver lock. If it fails, someone else is offering to that driver; skip.
+6. Write the offer columns, `WHERE status = 'REQUESTED'`. Zero rows means the rider cancelled; stop.
+7. Publish the offer on `driver:{id}`.
+8. The gateway node holding that socket forwards it.
+9. Driver accepts; the conditional UPDATE (section 7.2) moves the trip to MATCHED or returns 409.
+10. The outbox emits `trip.matched`; the Notifier tells the rider.
+11. On decline or timeout: release the lock if it is still ours and remember the driver as tried.
+12. Next candidate. After 60 s with no match the trip is CANCELLED by SYSTEM with `NO_DRIVERS`.
 
 **Trip and payment**
 
-1. Payment service, on `trip.requested`: `INSERT payments (AUTH_PENDING) ON CONFLICT DO NOTHING`, then
-   authorize the quoted fare plus 20% with idempotency key `auth-{trip_id}`. This runs in parallel with
-   dispatch; it does not block matching.
-2. Driver taps arrived (or is within 150 m of pickup): DRIVER_ARRIVING, wait timer starts.
-3. Driver enters the rider's PIN: IN_PROGRESS. The rider watches the car through `trip:{trip_id}`.
-4. Driver ends the trip: the Trip service reads `trip:path:{id}`, computes distance, writes the polyline to S3,
-   sets `final_fare_cents` (the quote, unless the rules below apply) and COMPLETED, in one transaction with
-   the outbox row.
-5. Payment service, on `trip.completed`: capture with key `capture-{trip_id}`, mark CAPTURED, emit
-   `payment.captured`; the Notifier sends the receipt.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/trip-payment-dark.png">
+  <img alt="Sequence: on trip.requested the Payment service inserts a payment row and authorizes with key auth-trip_id. The driver marks arrived and start, each a conditional UPDATE. On complete, the Trip service reads the path from Redis, finalizes the fare and commits COMPLETED; on trip.completed the Payment service captures with key capture-trip_id." src="diagrams/trip-payment-light.png">
+</picture>
+
+1. `trip.requested` reaches the Payment service, in parallel with dispatch.
+2. It inserts the payment row; a redelivered event changes nothing.
+3. It authorizes the quote plus 20%, keyed `auth-{trip_id}`.
+4. The row becomes AUTHORIZED.
+5. Driver taps arrived, or the 150 m geofence fires.
+6. MATCHED to DRIVER_ARRIVING; the wait timer starts.
+7. Driver enters the rider's PIN.
+8. DRIVER_ARRIVING to IN_PROGRESS; the rider watches the car on `trip:{trip_id}`.
+9. Driver ends the trip.
+10. The Trip service reads the path, computes the distance and final fare, and commits COMPLETED with the outbox row.
+11. `trip.completed` reaches the Payment service.
+12. Capture the final fare, keyed `capture-{trip_id}`; a timeout is retried with the same key.
+13. The row becomes CAPTURED and `payment.captured` triggers the receipt.
 
 ## 7. Deep dives
 
@@ -369,10 +384,23 @@ every 5 s: evict drivers with ts older than 30 s           # app killed, tunnel,
 query(cell, k, type): union cells[c] for c in kRing(cell, k), filter type, sort by straight-line distance
 ```
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/geo-index-dark.png">
+  <img alt="Sequence: the gateway produces pings to Kafka, each geo index replica consumes them in its own group; on restart the replica seeks to now minus 30 s and replays; Dispatch queries ring k = 2, widens to k = 4, gets an ETA matrix from Routing and ranks." src="diagrams/geo-index-light.png">
+</picture>
+
+1. The gateway produces each ping, keyed by driver id.
+2. Every replica consumes the whole region topic in its own consumer group and applies `apply(ping)`.
+3. Restart: seek to the offset for `now - 30 s` and replay. No snapshot.
+4. The replica reports ready once lag is under 1 s, usually 10 to 20 s after start.
+5. Dispatch asks for ring k = 2 (19 cells). Three drivers is fewer than the 8 it wants.
+6. It widens to k = 4 (61 cells) and gets 11, sorted by straight-line distance.
+7. Routing turns them into road ETAs.
+8. Rank by ETA, then heading and idle time; keep the top 5 for offers.
+
 The largest region has a few hundred thousand drivers, ~75k pings per second: one process with a few consumer
-threads handles it, and memory is under 100 MB. Restart: the replica seeks its consumer to the offset for
-`now - 30 s` and replays; it reports ready once lag is under 1 s, usually within 10 to 20 s. No snapshot, no
-persistence: **the index is a 30-second cache of the stream**.
+threads handles it, and memory is under 100 MB. No snapshot, no persistence: **the index is a 30-second cache
+of the stream**.
 
 **Why not Redis GEO.** It is the right answer for one city at a few thousand updates per second. At this scale:
 each GEOADD is a network round trip on a sorted set, so 1.25M/s needs a large cluster just for writes;
@@ -455,17 +483,21 @@ wait 20 minutes and nobody new comes online. A higher price there reduces demand
 **Computation, on the stream.** A Flink job (Kafka Streams would also do; Flink earns its place with event-time
 windows and keyed state) keyed by H3 res-7 cell, about 5 km²:
 
-- Supply: distinct AVAILABLE drivers whose latest ping in the last 2 minutes falls in the cell.
-- Demand: distinct riders who asked for an estimate (`pricing.quotes`) or requested (`trip.events`) in the cell
-  in the last 2 minutes. Distinct, so one rider refreshing ten times counts once.
-- Every 30 s: `ratio = demand / max(supply, 1)`, `raw = clamp(1 + a * (ratio - 1), 1.0, cap)`, where `a` and
-  `cap` come from per-region config (some cities legally cap surge).
-- Smoothing: average with the ring-1 neighbours so adjacent cells do not differ by 1.5x across one street, and
-  limit the change per tick to +/-0.3 so the price does not flap.
-- Write `surge:{cell}` with TTL 120 s and emit to `surge.updates` for audit.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/surge-pipeline-dark.png">
+  <img alt="Surge pipeline: location pings feed supply per cell, quotes and requests feed demand per cell; a Flink step computes the multiplier every 30 s, smooths it, writes surge:cell to Redis and surge.updates to Kafka; Pricing reads one key per estimate and locks it in the quote token." src="diagrams/surge-pipeline-light.png">
+</picture>
 
-**Reading it.** Pricing reads one Redis key per estimate. Every rider in the cell sees the same number for 30 s,
-which is fairer and far cheaper than computing surge per request.
+1. Supply: distinct AVAILABLE drivers whose latest ping in the last 2 minutes falls in the cell.
+2. Demand: distinct riders who asked for an estimate or requested in the cell in the last 2 minutes. One rider
+   refreshing ten times counts once.
+3. Every 30 s: `ratio = demand / max(supply, 1)`, `raw = clamp(1 + a * (ratio - 1), 1.0, cap)`. `a` and `cap`
+   are per-region config; some cities cap surge by law.
+4. Smoothing: average with the ring-1 neighbours so prices do not jump 1.5x across one street, and limit the
+   change per tick to +/-0.3 so the price does not flap.
+5. Write `surge:{cell}` with TTL 120 s; emit to `surge.updates` for audit.
+6. Pricing reads one key per estimate. Everyone in the cell sees the same number for 30 s, which is fairer and
+   far cheaper than computing surge per request.
 
 **Locking the price.** The multiplier and the fare are inside the signed quote token, valid 5 minutes. The rider
 pays what they saw, even if surge jumps one tick later. The token needs no storage: verification is an HMAC

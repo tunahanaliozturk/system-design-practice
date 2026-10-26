@@ -1,0 +1,28 @@
+{
+  "type": "architecture",
+  "title": "Ride-hailing: surge pipeline",
+  "subtitle": "One Flink job keyed by H3 res-7 cell; every rider in a cell sees the same multiplier for 30 s",
+  "nodes": [
+    { "id": "kloc", "kind": "queue", "label": "Location stream", "col": 0, "row": 0, "lines": ["`locations.{region}`", "AVAILABLE pings"] },
+    { "id": "kdem", "kind": "queue", "label": "Kafka", "col": 0, "row": 1, "lines": ["`pricing.quotes`", "`trip.events` requested"] },
+    { "id": "sup", "kind": "worker", "tag": "FLINK", "label": "Supply per cell", "col": 1, "row": 0, "lines": ["latest ping per driver", "distinct, 2 min window"] },
+    { "id": "dem", "kind": "worker", "tag": "FLINK", "label": "Demand per cell", "col": 1, "row": 1, "lines": ["distinct riders", "2 min window"] },
+    { "id": "mul", "kind": "worker", "tag": "FLINK", "label": "Multiplier", "col": 2, "row": 0.5, "lines": ["every 30 s", "1 + a x (ratio - 1)", "clamp to region cap"] },
+    { "id": "smo", "kind": "worker", "tag": "FLINK", "label": "Smoothing", "col": 3, "row": 0.5, "lines": ["average with ring 1", "step limit +/- 0.3"] },
+    { "id": "rd", "kind": "redis", "label": "Redis", "col": 4, "row": 0, "lines": ["`surge:{cell}`", "TTL 120 s"] },
+    { "id": "aud", "kind": "queue", "label": "Kafka", "col": 4, "row": 1, "lines": ["`surge.updates`", "audit, analytics"] },
+    { "id": "pr", "kind": "service", "label": "Pricing", "col": 5, "row": 0, "lines": ["one GET per estimate", "missing key: 1.0"] },
+    { "id": "q", "kind": "client", "label": "Quote token", "col": 5, "row": 1, "lines": ["multiplier locked", "for 5 minutes"] }
+  ],
+  "edges": [
+    { "from": "kloc", "to": "sup", "step": 1, "dashed": true },
+    { "from": "kdem", "to": "dem", "step": 2, "dashed": true },
+    { "from": "sup", "to": "mul", "route": "hvh", "via": 555, "offset2": -14, "step": 3 },
+    { "from": "dem", "to": "mul", "route": "hvh", "via": 582, "offset2": 14 },
+    { "from": "mul", "to": "smo", "step": 4 },
+    { "from": "smo", "to": "rd", "route": "hvh", "via": 1135, "offset": -14, "step": 5 },
+    { "from": "smo", "to": "aud", "route": "hvh", "via": 1162, "offset": 14, "dashed": true },
+    { "from": "rd", "to": "pr", "step": 6, "label": "GET" },
+    { "from": "pr", "to": "q", "label": "signs" }
+  ]
+}

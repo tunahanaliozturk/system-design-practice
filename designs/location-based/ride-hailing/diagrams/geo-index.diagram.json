@@ -1,0 +1,30 @@
+{
+  "type": "sequence",
+  "title": "Ride-hailing: geo index ingest, restart and ring search",
+  "subtitle": "The index is a 30-second cache of the stream: no snapshot, a restart is a replay",
+  "spacing": 220,
+  "participants": [
+    { "id": "gw", "kind": "gateway", "label": "Driver gateway" },
+    { "id": "k", "kind": "queue", "label": "Kafka" },
+    { "id": "g", "kind": "service", "label": "Geo index replica" },
+    { "id": "d", "kind": "service", "label": "Dispatch" },
+    { "id": "rt", "kind": "service", "label": "Routing / ETA" }
+  ],
+  "steps": [
+    { "section": "ingest: every ping" },
+    { "from": "gw", "to": "k", "label": "produce, key driver_id" },
+    { "from": "k", "to": "g", "dashed": true, "label": "batch (own consumer group)" },
+    { "note": "drivers[id] = ping, unless ts is not newer\ncells[cell] holds AVAILABLE drivers only\nevery 5 s: evict drivers silent for 30 s", "at": "g" },
+    { "section": "restart" },
+    { "from": "g", "to": "k", "label": "seek to offset for now - 30 s, replay" },
+    { "from": "g", "to": "g", "label": "ready when lag < 1 s (10-20 s)" },
+    { "section": "ring search for one request" },
+    { "from": "d", "to": "g", "label": "query(pickup cell, k = 2, standard)" },
+    { "from": "g", "to": "d", "reply": true, "label": "19 cells: 3 drivers, fewer than 8" },
+    { "from": "d", "to": "g", "label": "query(pickup cell, k = 4)" },
+    { "from": "g", "to": "d", "reply": true, "label": "61 cells: 11 drivers by straight line" },
+    { "from": "d", "to": "rt", "label": "ETA matrix: 11 drivers to pickup" },
+    { "from": "rt", "to": "d", "reply": true, "label": "road ETAs" },
+    { "from": "d", "to": "d", "label": "rank by ETA, heading, idle time; top 5" }
+  ]
+}
