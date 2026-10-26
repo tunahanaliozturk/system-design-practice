@@ -62,12 +62,12 @@ function rich(text, x, y, size, color, extra = "") {
 }
 
 function pill(cx, cy, label, t, step) {
-  const size = 11.5;
+  const size = 12.5;
   const w = textWidth(label, size) + (label ? 14 : 0) + (step ? 22 : 0);
-  const h = 21;
+  const h = 23;
   let out = "";
   if (label) {
-    out += `<rect x="${cx - w / 2}" y="${cy - h / 2}" width="${w}" height="${h}" rx="10.5" fill="${t.pill}" stroke="${t.line}"/>`;
+    out += `<rect x="${cx - w / 2}" y="${cy - h / 2}" width="${w}" height="${h}" rx="11.5" fill="${t.pill}" stroke="${t.line}"/>`;
   }
   let tx = cx - w / 2 + 7;
   if (step) {
@@ -81,8 +81,8 @@ function pill(cx, cy, label, t, step) {
 }
 
 function header(spec, t) {
-  let out = rich(spec.title ?? "", 32, 42, 19, t.ink, 'font-weight="700"');
-  if (spec.subtitle) out += rich(spec.subtitle, 32, 64, 13, t.muted);
+  let out = rich(spec.title ?? "", 32, 42, 21, t.ink, 'font-weight="700"');
+  if (spec.subtitle) out += rich(spec.subtitle, 32, 66, 14, t.muted);
   return out;
 }
 
@@ -240,7 +240,7 @@ function renderArchitecture(spec, t) {
   body.push(...labels);
 
   const dashedUsed = (spec.edges ?? []).some((e) => e.dashed);
-  let W = Math.max(maxX + 32, textWidth(spec.title ?? "", 19) + 64);
+  let W = Math.max(maxX + 32, textWidth(spec.title ?? "", 21) + 64);
   let H = maxY + 32;
   if (dashedUsed) {
     H += 30;
@@ -258,7 +258,7 @@ function renderSequence(spec, t) {
   const top = spec.subtitle ? 96 : 80;
   const left = 32;
   const boxW = Math.min(gap - 24, 176);
-  const boxH = 52;
+  const boxH = 56;
   const ps = new Map();
   spec.participants.forEach((p, i) => ps.set(p.id, { ...p, x: left + boxW / 2 + i * gap }));
   const lastX = left + boxW / 2 + (spec.participants.length - 1) * gap;
@@ -272,14 +272,14 @@ function renderSequence(spec, t) {
       y += 40;
     } else if (s.note) {
       const lines = String(s.note).split("\n");
-      const h = 14 + lines.length * 17;
+      const h = 16 + lines.length * 19;
       rows.push({ s, y: y - 14, h, lines });
       y += h + 22;
     } else {
       const self = s.from === s.to;
       if (spec.numbered !== false && !s.reply) n += 1;
       rows.push({ s, y, num: spec.numbered !== false && !s.reply ? n : null });
-      y += self ? 58 : 46;
+      y += self ? 62 : 52;
     }
   }
   const bottom = y + 6;
@@ -293,26 +293,26 @@ function renderSequence(spec, t) {
     const dashed = p.kind === "external" ? 'stroke-dasharray="6 4"' : "";
     body.push(`<rect x="${bx}" y="${top}" width="${boxW}" height="${boxH}" rx="10" fill="${t.fill}" stroke="${t.line}" stroke-width="1.3" ${dashed}/>`);
     body.push(`<path d="M${bx + 10} ${top} H${bx + boxW - 10}" stroke="${accent}" stroke-width="3" stroke-linecap="round"/>`);
-    body.push(rich(p.tag ?? TAGS[p.kind] ?? "", p.x, top + 20, 9.5, accent, 'text-anchor="middle" font-weight="700" letter-spacing="0.9"'));
-    body.push(rich(p.label, p.x, top + 39, 13.5, t.ink, 'text-anchor="middle" font-weight="600"'));
+    body.push(rich(p.tag ?? TAGS[p.kind] ?? "", p.x, top + 21, 10.5, accent, 'text-anchor="middle" font-weight="700" letter-spacing="0.9"'));
+    body.push(rich(p.label, p.x, top + 42, 15, t.ink, 'text-anchor="middle" font-weight="600"'));
   }
 
   for (const r of rows) {
     const s = r.s;
     if (s.section) {
       body.push(`<line x1="${left - 8}" y1="${r.y}" x2="${lastX + boxW / 2 + 8}" y2="${r.y}" stroke="${t.line}" stroke-width="1.2" stroke-dasharray="2 4"/>`);
-      const w = textWidth(s.section, 11.5) + 18;
-      body.push(`<rect x="${left - 8}" y="${r.y - 11}" width="${w}" height="22" rx="4" fill="${t.bg}" stroke="${t.line}"/>`);
-      body.push(rich(s.section, left + 1, r.y + 4, 11.5, t.muted, 'font-weight="700"'));
+      const w = textWidth(s.section, 12.5) + 18;
+      body.push(`<rect x="${left - 8}" y="${r.y - 12}" width="${w}" height="24" rx="4" fill="${t.bg}" stroke="${t.line}"/>`);
+      body.push(rich(s.section, left + 1, r.y + 4.5, 12.5, t.muted, 'font-weight="700"'));
     } else if (s.note) {
       const xs = (s.over ?? [s.at]).map((id) => ps.get(id).x);
       const mid = (Math.min(...xs) + Math.max(...xs)) / 2;
-      const half = Math.max((Math.max(...xs) - Math.min(...xs)) / 2 + 70, ...r.lines.map((l) => textWidth(l, 12) / 2 + 18));
+      const half = Math.max((Math.max(...xs) - Math.min(...xs)) / 2 + 70, ...r.lines.map((l) => textWidth(l, 13.5) / 2 + 18));
       const x1 = Math.max(mid - half, 16);
       const x2 = x1 + 2 * half;
       noteRight = Math.max(noteRight, x2);
       body.push(`<rect x="${x1}" y="${r.y}" width="${x2 - x1}" height="${r.h}" rx="6" fill="${t.note}" stroke="${t.noteLine}" stroke-width="1"/>`);
-      r.lines.forEach((l, i) => body.push(rich(l, (x1 + x2) / 2, r.y + 21 + i * 17, 12, t.ink, 'text-anchor="middle"')));
+      r.lines.forEach((l, i) => body.push(rich(l, (x1 + x2) / 2, r.y + 23 + i * 19, 13.5, t.ink, 'text-anchor="middle"')));
     } else {
       const a = ps.get(s.from).x;
       const b = ps.get(s.to).x;
@@ -322,13 +322,13 @@ function renderSequence(spec, t) {
         body.push(labelLeft(a + 48, r.y + 15, s.label, r.num, t));
       } else {
         const dir = b > a ? 1 : -1;
-        body.push(`<line x1="${a}" y1="${r.y + 12}" x2="${b - dir * 2}" y2="${r.y + 12}" stroke="${t.edge}" stroke-width="1.6" ${dash} marker-end="url(#head)"/>`);
+        body.push(`<line x1="${a}" y1="${r.y + 14}" x2="${b - dir * 2}" y2="${r.y + 14}" stroke="${t.edge}" stroke-width="1.6" ${dash} marker-end="url(#head)"/>`);
         body.push(labelLeft(Math.min(a, b) + 10, r.y, s.label, r.num, t));
       }
     }
   }
 
-  const W = Math.ceil(spec.width ?? Math.max(lastX + boxW / 2 + 40, noteRight + 24, textWidth(spec.title ?? "", 19) + 64));
+  const W = Math.ceil(spec.width ?? Math.max(lastX + boxW / 2 + 40, noteRight + 24, textWidth(spec.title ?? "", 21) + 64));
   const H = Math.ceil(spec.height ?? bottom + 24);
   return { W, H, svg: wrap(W, H, t, header(spec, t) + body.join("")) };
 }
@@ -337,11 +337,11 @@ function labelLeft(x, y, label, num, t) {
   let out = "";
   let tx = x;
   if (num) {
-    out += `<circle cx="${x + 8}" cy="${y - 4}" r="8.5" fill="${t.step}"/>`;
-    out += `<text x="${x + 8}" y="${y - 0.3}" text-anchor="middle" font-family="${SANS}" font-size="10" font-weight="700" fill="#ffffff">${num}</text>`;
-    tx += 22;
+    out += `<circle cx="${x + 9}" cy="${y - 5}" r="9.5" fill="${t.step}"/>`;
+    out += `<text x="${x + 9}" y="${y - 0.8}" text-anchor="middle" font-family="${SANS}" font-size="11" font-weight="700" fill="#ffffff">${num}</text>`;
+    tx += 25;
   }
-  return out + rich(label ?? "", tx, y, 12.5, t.ink);
+  return out + rich(label ?? "", tx, y, 14, t.ink);
 }
 
 function wrap(W, H, t, inner) {
